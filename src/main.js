@@ -60,6 +60,7 @@ class App {
     this.moveSpeed = 0;
     this.stepClock = 0;
     this.buildVignette();
+    this.buildAttackMarkers();
 
     this.setupDesktopInput();
     this.setupXR();
@@ -250,6 +251,49 @@ class App {
       this.rep.aim(ray.origin, ray.dir);
       this.rep.select();
     }
+  }
+
+  // chevrons on the grass at your feet and a marker over the goal you're attacking (+x)
+  buildAttackMarkers() {
+    const shape = new THREE.Shape();
+    shape.moveTo(0, 0.22); shape.lineTo(0.2, 0); shape.lineTo(0, -0.22);
+    shape.lineTo(-0.08, -0.22); shape.lineTo(0.11, 0); shape.lineTo(-0.08, 0.22); shape.closePath();
+    const geo = new THREE.ShapeGeometry(shape);
+    geo.rotateX(-Math.PI / 2); // lie flat, pointing +x
+    this.chevrons = new THREE.Group();
+    this.chevronMats = [0, 1, 2].map((i) => {
+      const m = new THREE.MeshBasicMaterial({ color: 0xff7a1a, transparent: true, opacity: 0.5, depthWrite: false });
+      const c = new THREE.Mesh(geo, m);
+      c.position.set(0.9 + i * 0.32, 0.015, 0);
+      this.chevrons.add(c);
+      return m;
+    });
+    this.chevrons.visible = false;
+    this.scene.add(this.chevrons);
+
+    const tri = new THREE.Shape();
+    tri.moveTo(-0.7, 0.5); tri.lineTo(0.7, 0.5); tri.lineTo(0, -0.55); tri.closePath();
+    this.goalMarker = new THREE.Mesh(new THREE.ShapeGeometry(tri), new THREE.MeshBasicMaterial({ color: 0xff7a1a, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false }));
+    this.goalMarker.position.set(52.5, 4.6, 0);
+    this.goalMarker.visible = false;
+    this.scene.add(this.goalMarker);
+    this.markerT = 0;
+  }
+
+  updateAttackMarkers(dt) {
+    const show = ['play', 'card', 'quiz'].includes(this.mode) && this.rep && this.session?.drill !== 'rondo';
+    this.chevrons.visible = this.goalMarker.visible = !!show && this.mode !== 'quiz';
+    if (!show) return;
+    this.markerT += dt;
+    const u = this.world.userPos();
+    this.chevrons.position.set(u.x, 0, u.z);
+    // a slow ripple outward so it reads as a direction, not decoration
+    this.chevronMats.forEach((m, i) => { m.opacity = 0.25 + 0.45 * Math.max(0, Math.sin(this.markerT * 3 - i * 0.9)); });
+    const h = this.headPos();
+    const gm = this.goalMarker;
+    gm.lookAt(h.x, gm.position.y, h.z);
+    gm.scale.setScalar(Math.max(1, h.distanceTo(gm.position) / 22));
+    gm.position.y = 4.6 + gm.scale.x * 0.6 + Math.sin(this.markerT * 2) * 0.15;
   }
 
   // tunnel vignette that closes in while you run, for comfort
@@ -773,6 +817,7 @@ class App {
     }
     this.pollButtons();
     this.locomotion(dt);
+    this.updateAttackMarkers(dt);
 
     const fm = this.fade.material;
     fm.opacity += (this.fadeTo - fm.opacity) * Math.min(1, dt * 8);
