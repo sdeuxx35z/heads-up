@@ -53,6 +53,9 @@ export class Player {
     this.maxSpeed = 6.5;
     this.phase = Math.random() * 10;
     this.wobble = Math.random() * 100;
+    this.mood = 0; // 0 normal, 1 celebrating, 2 dejected
+    this.cel = 0;
+    this.dej = 0;
 
     const root = new THREE.Group();
     const body = new THREE.Group();
@@ -71,10 +74,12 @@ export class Player {
     const head = new THREE.Mesh(geo.head, skin);
     head.position.y = 1.68;
     body.add(head);
+    this.head = head;
     const hair = new THREE.Mesh(geo.hair, lambert(HAIR[(Math.random() * HAIR.length) | 0]));
     hair.position.y = 1.7;
     hair.rotation.x = -0.25;
     body.add(hair);
+    this.hair = hair;
 
     const mkLeg = (side) => {
       const hip = new THREE.Group();
@@ -139,6 +144,7 @@ export class Player {
     this.pos.set(x, 0, z);
     this.target.copy(this.pos);
     this.vel.set(0, 0, 0);
+    this.mood = 0; this.cel = 0; this.dej = 0;
     this.sync();
   }
 
@@ -166,11 +172,16 @@ export class Player {
     let diff = want - this.heading;
     diff = Math.atan2(Math.sin(diff), Math.cos(diff));
     this.heading += diff * Math.min(1, dt * 7);
-    this.animate(dt, speed);
+    this.animate(dt, speed, this.mood === 1);
     this.sync();
   }
 
-  animate(dt, speed) {
+  // celebrate: arms up and a little jump. mood 2 (dejected) lets the head and shoulders drop.
+  animate(dt, speed, celebrate = false) {
+    const k = Math.min(1, dt * 8);
+    this.cel += ((celebrate ? 1 : 0) - this.cel) * k;
+    this.dej += ((this.mood === 2 ? 1 : 0) - this.dej) * k;
+    const c = this.cel, dj = this.dej;
     this.phase += dt * (3 + speed * 1.55);
     const amp = Math.min(1, speed / 6) * 0.85;
     const s = Math.sin(this.phase);
@@ -178,10 +189,17 @@ export class Player {
     this.legs[1].hip.rotation.x = -s * amp;
     this.legs[0].knee.rotation.x = Math.max(0, -Math.cos(this.phase)) * amp * 1.3 + 0.08;
     this.legs[1].knee.rotation.x = Math.max(0, Math.cos(this.phase)) * amp * 1.3 + 0.08;
-    this.arms[0].rotation.x = -s * amp * 0.9;
-    this.arms[1].rotation.x = s * amp * 0.9;
-    this.body.position.y = Math.abs(Math.cos(this.phase)) * amp * 0.06;
-    this.body.rotation.x = amp * 0.16;
+    const swing = s * amp * 0.9 * (1 - 0.5 * dj);
+    const wave = Math.sin(this.phase * 1.6) * 0.18;
+    this.arms[0].rotation.x = -swing * (1 - c) + (-2.6 + wave) * c;
+    this.arms[1].rotation.x = swing * (1 - c) + (-2.6 - wave) * c;
+    this.arms[0].rotation.z = -(0.12 + 0.45 * c);
+    this.arms[1].rotation.z = 0.12 + 0.45 * c;
+    this.body.position.y = Math.abs(Math.cos(this.phase)) * amp * 0.06 + Math.abs(Math.sin(this.phase * 1.2)) * 0.14 * c;
+    this.body.rotation.x = amp * 0.16 + 0.22 * dj;
+    this.head.rotation.x = 0.5 * dj;
+    this.head.position.y = 1.68 - 0.05 * dj;
+    this.hair.position.y = 1.7 - 0.05 * dj;
   }
 
   sync() {

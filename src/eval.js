@@ -31,6 +31,7 @@ function minMargin(a, b, opps, speed, lofted) {
 
 const nearestDist = (p, opps) => opps.reduce((best, o) => Math.min(best, Math.hypot(o.pos.x - p.x, o.pos.z - p.z)), Infinity);
 
+const KEEPER_WEIGHTS = { safe: 0.58, space: 0.24, prog: 0.12, lines: 0.06 };
 const WEIGHTS = {
   def: { safe: 0.5, space: 0.25, prog: 0.15, lines: 0.1 },
   mid: { safe: 0.4, space: 0.25, prog: 0.2, lines: 0.15 },
@@ -38,8 +39,11 @@ const WEIGHTS = {
 };
 
 // Scores every pass (and the shot, if in range) from the ball's position.
-export function evaluateOptions(ball, mates, opps, group) {
-  const w = WEIGHTS[group];
+// opts.keeper: the viewer is the goalkeeper. Safety counts for more, a receiver with a presser
+// on him is punished, and a long ball into a duel is a coin flip, not a good pass.
+export function evaluateOptions(ball, mates, opps, group, opts = {}) {
+  const keeper = !!opts.keeper;
+  const w = keeper ? KEEPER_WEIGHTS : WEIGHTS[group];
   const outfieldOpps = opps.filter((o) => o.slot !== 'GK');
   const out = [];
   for (const t of mates) {
@@ -58,6 +62,11 @@ export function evaluateOptions(ball, mates, opps, group) {
     if (safe < 0.25) value *= 0.45;
     // a pass back to the keeper is safe but rarely the best idea
     if (t.slot === 'GK') value *= 0.7;
+    if (keeper) {
+      const near = nearestDist(t.pos, opps);
+      if (near < 4) value *= 0.6; // received under the press
+      if (lofted && near < 6) value *= 0.65; // a long ball into a duel
+    }
     out.push({ kind: 'pass', target: t, value, safe, space, prog, lines, margin: m, threat: who, lofted, speed });
   }
   const gx = GOAL.x;
@@ -80,4 +89,21 @@ export function scoreDecision(chosen, options) {
   if (!chosen || !options.length) return 0;
   const best = options[0].value || 1e-6;
   return Math.round(clamp((chosen.value / best) * 100, 0, 100));
+}
+
+// Rondo: five on the edge, two in the middle. Only lane margins and space matter; there is no
+// progression. mates need .pos, defenders need .pos. Returns options best first.
+export function evaluateRondo(ball, mates, defenders, speed = 16) {
+  const out = [];
+  for (const t of mates) {
+    if (Math.hypot(t.pos.x - ball.x, t.pos.z - ball.z) < 2) continue;
+    const { m, who } = minMargin(ball, t.pos, defenders, speed, false);
+    const safe = clamp((m + 0.4) / 2.6, 0, 1);
+    const space = clamp((nearestDist(t.pos, defenders) - 1.5) / 5, 0, 1);
+    let value = 0.75 * safe + 0.25 * space;
+    if (safe < 0.2) value *= 0.4;
+    out.push({ kind: 'pass', target: t, value, safe, space, prog: 0, lines: 0, margin: m, threat: who, lofted: false, speed });
+  }
+  out.sort((a, b) => b.value - a.value);
+  return out;
 }

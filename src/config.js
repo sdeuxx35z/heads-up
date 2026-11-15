@@ -32,6 +32,8 @@ export const ROLES = {
   CAM: { name: 'NUMBER 10',    formation: F4231, slots: ['CAM'],        ballX: 2,   group: 'att' },
   W:   { name: 'WINGER',       formation: F433,  slots: ['LW', 'RW'],   ballX: 10,  group: 'att' },
   ST:  { name: 'STRIKER',      formation: F433,  slots: ['ST'],         ballX: 14,  group: 'att' },
+  // anchor pushes the outfield block upfield of the deep ball so the back line is not on the goal line
+  GK:  { name: 'GOALKEEPER',   formation: F433,  slots: ['GK'],         ballX: -40, group: 'def', anchor: 28 },
 };
 export const ROLE_KEYS = Object.keys(ROLES);
 
@@ -52,6 +54,8 @@ export const CAREER = Array.from({ length: 24 }, (_, i) => ({
   difficulty: DIFF_KEYS[Math.floor(i / 6)],
   reps: 6,
   quizChance: i % 6 === 4 ? 0.8 : 0.3,
+  // every stage mixes in a rondo and an awareness test
+  drill: i % 6 === 2 ? 'rondo' : i % 6 === 4 ? 'awareness' : 'match',
 }));
 export const STAR_LINES = [55, 70, 85];
 

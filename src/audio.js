@@ -58,6 +58,8 @@ export class Audio {
     lfo.connect(lfoGain).connect(this.crowdGain.gain);
     s.connect(bp).connect(this.crowdGain).connect(this.master);
     s.start(); lfo.start();
+    const sing = () => { this.chant(); setTimeout(sing, 25000 + Math.random() * 30000); };
+    setTimeout(sing, 8000);
   }
 
   swell(amount, dur = 2.2, freq = 900) {
@@ -74,12 +76,26 @@ export class Audio {
     s.start(t); s.stop(t + dur + 0.1);
   }
 
-  cheer(k = 0.5) { this.swell(0.25 + k * 0.6, 1.6 + k * 1.8, 1000); }
+  cheer(k = 0.5) {
+    this.swell(0.25 + k * 0.6, 1.6 + k * 1.8, 1000);
+    if (k > 0.3) this.applause(k);
+  }
   groan() { this.swell(0.35, 1.4, 380); }
 
-  kick(power = 0.8) {
+  // pan: -1 left .. 1 right, from where the ball is relative to the head
+  out(pan) {
+    if (!pan) return this.master;
+    const p = this.ctx.createStereoPanner();
+    p.pan.value = Math.max(-1, Math.min(1, pan));
+    p.connect(this.master);
+    return p;
+  }
+
+  kick(power = 0.8, pan = 0, far = 0) {
     if (!this.ctx) return;
     const c = this.ctx, t = c.currentTime;
+    const dest = this.out(pan);
+    power *= 1 - Math.min(0.75, far / 50);
     const o = c.createOscillator();
     o.type = 'sine';
     o.frequency.setValueAtTime(150, t);
@@ -87,7 +103,7 @@ export class Audio {
     const g = c.createGain();
     g.gain.setValueAtTime(0.5 * power, t);
     g.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
-    o.connect(g).connect(this.master);
+    o.connect(g).connect(dest);
     o.start(t); o.stop(t + 0.2);
     const n = this.src();
     const hp = c.createBiquadFilter();
@@ -95,11 +111,53 @@ export class Audio {
     const ng = c.createGain();
     ng.gain.setValueAtTime(0.25 * power, t);
     ng.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
-    n.connect(hp).connect(ng).connect(this.master);
+    n.connect(hp).connect(ng).connect(dest);
     n.start(t); n.stop(t + 0.08);
   }
 
-  touch() { this.kick(0.35); }
+  touch(pan = 0, far = 0) { this.kick(0.35, pan, far); }
+
+  // a burst of applause: many short noise claps
+  applause(k = 1) {
+    if (!this.ctx) return;
+    const c = this.ctx, t0 = c.currentTime;
+    const n = Math.round(60 + k * 140);
+    for (let i = 0; i < n; i++) {
+      const t = t0 + Math.random() * (1.2 + k * 1.8);
+      const s = this.src();
+      const bp = c.createBiquadFilter();
+      bp.type = 'bandpass'; bp.frequency.value = 1200 + Math.random() * 1800; bp.Q.value = 1.2;
+      const g = c.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.05 * k, t + 0.004);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
+      const p = c.createStereoPanner();
+      p.pan.value = Math.random() * 2 - 1;
+      s.connect(bp).connect(g).connect(p).connect(this.master);
+      s.start(t, Math.random()); s.stop(t + 0.07);
+    }
+  }
+
+  // the home end singing: rhythmic swells on a low band, now and then
+  chant() {
+    if (!this.ctx) return;
+    const c = this.ctx, t0 = c.currentTime;
+    const s = this.src();
+    const lp = c.createBiquadFilter();
+    lp.type = 'bandpass'; lp.frequency.value = 420; lp.Q.value = 2.5;
+    const g = c.createGain();
+    g.gain.value = 0.0001;
+    const beat = 0.62;
+    for (let i = 0; i < 12; i++) {
+      const t = t0 + i * beat;
+      const accent = i % 4 === 3 ? 0.5 : 0.28;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(accent, t + 0.08);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + beat * 0.9);
+    }
+    s.connect(lp).connect(g).connect(this.out(0.6 * (Math.random() < 0.5 ? -1 : 1)));
+    s.start(t0); s.stop(t0 + 12 * beat + 0.2);
+  }
 
   tick() {
     if (!this.ctx || !this.ticks) return;

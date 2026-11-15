@@ -20,6 +20,11 @@ export class World {
     this.away = AWAY_442.map(([slot, , , n]) =>
       new Player(scene, { kit: slot === 'GK' ? GK_AWAY : AWAY_KIT, number: n, team: 'away', slot }));
     this.ball = new Ball(scene);
+    this.rondoSquare = new THREE.LineLoop(
+      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-0.5, 0.04, -0.5), new THREE.Vector3(0.5, 0.04, -0.5), new THREE.Vector3(0.5, 0.04, 0.5), new THREE.Vector3(-0.5, 0.04, 0.5)]),
+      new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6 }));
+    this.rondoSquare.visible = false;
+    scene.add(this.rondoSquare);
     this.home = null;
     this.useFormation(ROLES.CM.formation);
     this.idle();
@@ -28,6 +33,8 @@ export class World {
 
   useFormation(F) {
     for (const [f, set] of this.homeSets) set.forEach((p) => p.setVisible(f === F));
+    this.away.forEach((p) => p.setVisible(true));
+    this.rondoSquare.visible = false;
     this.home = this.homeSets.get(F);
   }
 
@@ -38,12 +45,20 @@ export class World {
       p.place(x * 0.9, z);
       p.setVisible(true);
     });
-    this.away.forEach((p, i) => p.place(AWAY_442[i][1] * 0.9, AWAY_442[i][2]));
+    this.away.forEach((p, i) => { p.setVisible(true); p.place(AWAY_442[i][1] * 0.9, AWAY_442[i][2]); });
     this.ball.set(0, 0);
     this.idleT = 0;
   }
 
+  // 12 m grid the rondo is played in
+  showRondo(on, x = 0, z = 0, size = 12) {
+    this.rondoSquare.visible = on;
+    this.rondoSquare.position.set(x, 0, z);
+    this.rondoSquare.scale.set(size, 1, size);
+  }
+
   idleStep(dt) {
+    this.rondoSquare.visible = false;
     this.idleT += dt;
     const t = this.idleT;
     const bx = Math.sin(t * 0.07) * 18, bz = Math.sin(t * 0.11) * 14;

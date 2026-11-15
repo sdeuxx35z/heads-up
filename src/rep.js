@@ -11,10 +11,12 @@ const DEG = Math.PI / 180;
 
 const SCAN_ON = 58 * DEG, SCAN_OFF = 35 * DEG, SEEN = 48 * DEG;
 
-function homeTarget(slotDef, bx, bz, offsideX) {
+// shift moves the outfield block upfield of a deep ball (the keeper's recycle starts at x -40,
+// but the defenders must not stand on the goal line); the GK slot itself follows the real ball.
+function homeTarget(slotDef, bx, bz, offsideX, shift = 0) {
   const [name, sx, sz] = slotDef;
-  if (name === 'GK') return new THREE.Vector3(-47 + (bx + 52) * 0.06, 0, bz * 0.12);
-  let x = sx + bx * 0.5, z = sz * 0.9 + bz * 0.3;
+  if (name === 'GK') return new THREE.Vector3(clamp(-47 + (bx + 52) * 0.06, -49.5, -40), 0, clamp(bz * 0.12, -4, 4));
+  let x = sx + (bx + shift) * 0.5, z = sz * 0.9 + bz * 0.3;
   if (x > offsideX - 0.6 && bx < offsideX) x = offsideX - 0.6;
   return new THREE.Vector3(clamp(x, -50, 50), 0, clamp(z, -32, 32));
 }
@@ -38,12 +40,25 @@ export class Rep {
     this.fx = fx || {};
     this.state = 'setup';
     this.t = 0;
+    this.drillKey = 'match';
+    this.shift = this.role.anchor || 0;
+    this.keeper = role === 'GK';
+    this.windowScale = 1;
+    this.outcomeLen = 2.2;
+    this.holdRange = [0.7, 1.3];
   }
+
+  ht(i, bx, bz, offside) { return homeTarget(this.F[i], bx, bz, offside, this.shift); }
+
+  // pass scoring; drills with their own geometry override this
+  evaluate(from) { return evaluateOptions(from, this.mates, this.away, this.role.group, { keeper: this.keeper }); }
 
   start() {
     const w = this.world, role = this.role, d = this.diff;
     w.useFormation(role.formation);
     w.clearOverlays();
+    this.outcomeArrived = false;
+    this.touchT = 0;
     this.F = role.formation;
     this.home = w.home;
     this.away = w.away;
@@ -60,9 +75,11 @@ export class Rep {
     let bz = centre ? rand(-12, 12) : side * rand(5, 16);
 
     const allowGK = this.roleKey === 'CB';
-    const pool = this.mates.filter((p) => allowGK || p.slot !== 'GK');
+    let pool = this.mates.filter((p) => allowGK || p.slot !== 'GK');
+    // the keeper's recycle always comes from a centre back or full back
+    if (this.keeper) pool = pool.filter((p) => /CB|LB|RB/.test(p.slot));
     const offside0 = 30 + bx * 0.55 - 4;
-    const startTargets = this.F.map((s) => homeTarget(s, bx, bz, offside0));
+    const startTargets = this.F.map((s, i) => this.ht(i, bx, bz, offside0));
     const carrierCand = pool
       .map((p) => ({ p, d: startTargets[this.home.indexOf(p)].distanceTo(new THREE.Vector3(bx, 0, bz)) }))
       .sort((a, b) => a.d - b.d);
@@ -72,7 +89,7 @@ export class Rep {
 
     const offside = Math.min(...AWAY_442.slice(1, 5).map((s) => awayTarget(s, bx, bz).x));
     this.home.forEach((p, i) => {
-      const t = homeTarget(this.F[i], bx, bz, offside);
+      const t = this.ht(i, bx, bz, offside);
       p.place(t.x + rand(-1, 1) * d.jitter, t.z + rand(-1, 1) * d.jitter);
       p.maxSpeed = 6.2;
       p.wobble = Math.random() * 100;
@@ -90,7 +107,7 @@ export class Rep {
     w.placeUser(up, heading(up, this.carrier.pos));
     this.userStart = up.clone();
     this.userTarget = up.clone();
-    this.runOffset = new THREE.Vector3(rand(-2, 3), 0, rand(-3, 3));
+    this.runOffset = this.keeper ? new THREE.Vector3(rand(-1, 2), 0, rand(-2, 2)) : new THREE.Vector3(rand(-2, 3), 0, rand(-3, 3));
 
     const toBall = heading(up, this.carrier.pos);
 
@@ -111,6 +128,11 @@ export class Rep {
       const a = toBall + Math.PI + (i === 0 ? rand(-45, 45) : (Math.random() < 0.5 ? -1 : 1) * rand(70, 100)) * DEG;
       const dist = rand(...d.presserDist) + i * 2;
       const spot = new THREE.Vector3(up.x + Math.sin(a) * dist, 0, up.z + Math.cos(a) * dist);
+      if (this.keeper) {
+        // behind the keeper is the goal: the press comes from the front, the first man from the striker's spot
+        const fd = dist + 7 + i * 4;
+        spot.set(up.x + fd, 0, up.z + (i === 0 ? rand(-3, 3) : (i % 2 ? 1 : -1) * rand(8, 12)));
+      }
       spot.x = clamp(spot.x, -PITCH.HL + 1, PITCH.HL - 1);
       spot.z = clamp(spot.z, -PITCH.HW + 1, PITCH.HW - 1);
       const o = this.away.filter((p) => p.slot !== 'GK' && !taken.has(p))
@@ -148,8 +170,7 @@ export class Rep {
   }
 
   ballAt(p) {
-    const f = new THREE.Vector3(Math.sin(p.heading), 0, Math.cos(p.heading)).multiplyScalar(0.45);
-    this.world.ball.set(p.pos.x + f.x, p.pos.z + f.z);
+    this.world.ball.set(p.pos.x + Math.sin(p.heading) * 0.45, p.pos.z + Math.cos(p.heading) * 0.45);
   }
 
   nearestOpp(pos, exclude) {
@@ -162,10 +183,18 @@ export class Rep {
     return best;
   }
 
+  // Everything runs on the dt it is given (never the wall clock); a long frame is cut into
+  // 50 ms slices so a test calling app.frame(1) plays out the same as twenty real frames.
   update(dt) {
+    while (dt > 0.05) { this.tick(0.05); dt -= 0.05; }
+    if (dt > 0) this.tick(dt);
+  }
+
+  tick(dt) {
     if (this.state === 'quiz' || this.state === 'done' || this.state === 'setup') return;
     this.t += dt;
-    const w = this.world, ball = w.ball, d = this.diff;
+    this._dtLast = dt;
+    const w = this.world, ball = w.ball;
     const user = w.userPos();
 
     // --- ball events
@@ -181,12 +210,45 @@ export class Rep {
       if (arrived) this.onArrive();
     }
 
+    this.moveActors(dt, user);
+    this.userBody.pos.copy(w.userPos());
+    this.userBody.heading = w.headYaw();
+
+    // --- scanning
+    if (this.state === 'buildup' || this.state === 'incoming') this.trackScan(user, ball);
+
+    // --- decision window
+    if (this.state === 'decide') {
+      this.decideT += dt;
+      this.updateAimGlow();
+      if (this.decideT > this.window) this.timeout(user);
+    } else if (this.state === 'incoming') {
+      this.updateAimGlow();
+    }
+
+    if (this.state === 'outcome') {
+      this.outcomeT -= dt;
+      this.outcomeAge += dt;
+      if (this.outcomeT <= 0) this.finish();
+    }
+
+    this.record(dt);
+  }
+
+  timeout(user) {
+    const p = [...this.pressers].sort((a, b) => a.pos.distanceTo(user) - b.pos.distanceTo(user))[0];
+    this.lose(p);
+  }
+
+  // Sets every player's target and moves them. Drills with another layout override this.
+  moveActors(dt, user) {
+    const w = this.world, ball = w.ball, d = this.diff;
     // --- targets
     const bp = ball.flight ? ball.flight.to : ball.pos;
     const offside = Math.min(...this.away.filter((p) => /CB|LB|RB/.test(p.slot)).map((p) => p.pos.x));
     this.home.forEach((p, i) => {
       if (i === this.userIdx) return;
-      const t = homeTarget(this.F[i], bp.x, bp.z, offside);
+      const t = this.ht(i, bp.x, bp.z, offside);
       t.x += Math.sin(this.t * 0.6 + p.wobble) * 1.2;
       t.z += Math.cos(this.t * 0.5 + p.wobble) * 1.2;
       if (p === this.free) t.add(this.freeDrift);
@@ -213,7 +275,8 @@ export class Rep {
       }
       if (o.role === 'presser') {
         if (!this.finalStruck) {
-          o.target.copy(user).add(o.stalk);
+          if (this.keeper) o.target.copy(user).addScaledVector(o.stalk, Math.max(0.55, 1 - this.t * 0.07));
+          else o.target.copy(user).add(o.stalk);
           o.maxSpeed = 6;
         } else {
           // close down while the ball travels, then jockey a yard off until the window runs out
@@ -244,12 +307,13 @@ export class Rep {
       o.maxSpeed = 6;
     });
 
+    this.reactions();
     for (const p of this.home) if (p !== this.userBody) p.step(dt, ball.pos);
     for (const o of this.away) o.step(dt, ball.pos);
 
     // --- the viewer's run
     if (this.state === 'buildup' && this.motion) {
-      const t = homeTarget(this.F[this.userIdx], bp.x, bp.z, offside).add(this.runOffset);
+      const t = this.ht(this.userIdx, bp.x, bp.z, offside).add(this.runOffset);
       const to = t.sub(user).setY(0);
       const dist = to.length();
       if (dist > 0.3) {
@@ -257,30 +321,63 @@ export class Rep {
         w.moveUser(to.x, to.z);
       }
     }
-    this.userBody.pos.copy(w.userPos());
-    this.userBody.heading = w.headYaw();
+  }
 
-    // --- scanning
-    if (this.state === 'buildup' || this.state === 'incoming') this.trackScan(user, ball);
+  // Where the receiver turns and where a winner runs, written into scratch fields (no allocation).
+  afterTouchDirs(p) {
+    if (p.team === 'home') {
+      // touch and turn upfield, towards the middle of the pitch
+      this._tdx = 3.5; this._tdz = p.pos.z > 0 ? -2 : 2;
+    } else {
+      // an opponent who won it runs off the other way
+      this._tdx = -14; this._tdz = -p.pos.z * 0.3;
+    }
+  }
 
-    // --- decision window
-    if (this.state === 'decide') {
-      this.decideT += dt;
-      this.updateAimGlow();
-      if (this.decideT > this.window) {
-        const p = [...this.pressers].sort((a, b) => a.pos.distanceTo(user) - b.pos.distanceTo(user))[0];
-        this.lose(p);
+  // Outcome feel. Runs after targets are set and before anyone steps; scalars only, no allocation.
+  reactions() {
+    if (this.state !== 'outcome') return;
+    const o = this.outcome, tg = this.outcomeTarget, age = this.outcomeAge, ball = this.world.ball;
+    const ux = this.userBody.pos.x, uz = this.userBody.pos.z;
+    if (o === 'goal') {
+      if (age < 0.45) return;
+      for (let i = 0; i < this.home.length; i++) {
+        const p = this.home[i];
+        if (i === this.userIdx) continue;
+        const dx = p.pos.x - ux, dz = p.pos.z - uz;
+        if (dx * dx + dz * dz > 784) { p.mood = 0; continue; }
+        const a = i * 0.9, r = 2 + (i % 3) * 0.8;
+        p.target.set(ux + Math.sin(a) * r, 0, uz + Math.cos(a) * r);
+        p.maxSpeed = 7;
+        p.mood = 1;
       }
-    } else if (this.state === 'incoming') {
-      this.updateAimGlow();
+      return;
     }
-
-    if (this.state === 'outcome') {
-      this.outcomeT -= dt;
-      if (this.outcomeT <= 0) this.finish();
+    if ((o === 'completed' || o === 'tight') && tg && this.outcomeArrived) {
+      // take a touch (stand still on the ball), then turn away with it
+      this.touchT += this._dtLast || 0;
+      if (this.touchT < 0.25) { tg.target.copy(tg.pos); tg.maxSpeed = 1; }
+      else { tg.target.set(tg.pos.x + this._tdx, 0, tg.pos.z + this._tdz); tg.maxSpeed = 3.4; }
+      this.ballAt(tg);
+      return;
     }
-
-    this.record(dt);
+    if (o === 'intercepted' || o === 'lost') {
+      if (tg && this.outcomeArrived) {
+        tg.target.set(tg.pos.x + this._tdx, 0, tg.pos.z + this._tdz);
+        tg.maxSpeed = 7.2;
+        this.ballAt(tg);
+      }
+      if (age < 0.35) return;
+      // heads drop, slow walk
+      for (let i = 0; i < this.home.length; i++) {
+        const p = this.home[i];
+        if (i === this.userIdx) continue;
+        const dx = p.pos.x - ux, dz = p.pos.z - uz;
+        if (dx * dx + dz * dz > 900) { p.mood = 0; continue; }
+        p.mood = 2;
+        p.maxSpeed = 1.5;
+      }
+    }
   }
 
   nextPass(user) {
@@ -315,28 +412,33 @@ export class Rep {
       this.events.push({ t: this.t, type: 'pass' });
       this.fx.kick?.(0.7);
     } else {
-      // final ball to the viewer
-      const dir = from.pos.clone().sub(user).setY(0).normalize();
-      const land = user.clone().addScaledVector(dir, 0.6);
-      const dist = land.distanceTo(from.pos);
-      ball.kick(ball.pos, land, rand(14, 16.5), dist > LOFT_OVER ? dist * 0.08 : 0);
-      this.receiver = null;
-      this.finalStruck = true;
-      this.state = 'incoming';
-      this.strikeT = this.t;
-      this.events.push({ t: this.t, type: 'final' });
-      const toBall = heading(user, this.world.ball.pos);
-      this.watchedStrike = angDiff(this.world.headYaw(), toBall) < 38 * DEG;
-      this.strikeWatchUntil = this.t + 0.3;
-      this.fx.kick?.(0.8);
+      this.finalBall(from, user);
     }
+  }
+
+  // the last pass of the build-up: to the viewer
+  finalBall(from, user) {
+    const ball = this.world.ball;
+    const dir = from.pos.clone().sub(user).setY(0).normalize();
+    const land = user.clone().addScaledVector(dir, 0.6);
+    const dist = land.distanceTo(from.pos);
+    ball.kick(ball.pos, land, rand(14, 16.5), dist > LOFT_OVER ? dist * 0.08 : 0);
+    this.receiver = null;
+    this.finalStruck = true;
+    this.state = 'incoming';
+    this.strikeT = this.t;
+    this.events.push({ t: this.t, type: 'final' });
+    const toBall = heading(user, this.world.ball.pos);
+    this.watchedStrike = angDiff(this.world.headYaw(), toBall) < 38 * DEG;
+    this.strikeWatchUntil = this.t + 0.3;
+    this.fx.kick?.(0.8);
   }
 
   onArrive() {
     if (this.state === 'buildup' && this.receiver) {
       this.carrier = this.receiver;
       this.receiver = null;
-      this.hold = rand(0.7, 1.3);
+      this.hold = rand(this.holdRange[0], this.holdRange[1]);
       this.fx.touch?.();
       return;
     }
@@ -350,7 +452,7 @@ export class Rep {
       this.scanWindow = Math.max(0.5, this.receiveT - this.buildupStart);
       this.decideT = 0;
       this.knewPressure = this.sawPresser.every((s) => this.receiveT - s < 2.5);
-      this.window = this.diff.window + (this.knewPressure ? 0.6 : 0);
+      this.window = (this.diff.window + (this.knewPressure ? 0.6 : 0)) * this.windowScale;
       if (this.quizWanted) {
         this.snapshot = this.takeSnapshot(user);
         this.state = 'quiz';
@@ -359,8 +461,11 @@ export class Rep {
       this.enterDecide();
       return;
     }
-    if (this.state === 'outcome') {
+    if (this.state === 'outcome' && !this.outcomeArrived) {
       this.outcomeArrived = true;
+      this.touchT = 0;
+      const tg = this.outcomeTarget;
+      if (tg) this.afterTouchDirs(tg);
     }
   }
 
@@ -471,7 +576,7 @@ export class Rep {
   execute(choice, oneTouch) {
     const w = this.world, ball = w.ball;
     const from = ball.pos.clone();
-    const options = evaluateOptions(from, this.mates, this.away, this.role.group);
+    const options = this.evaluate(from);
     const chosen = options.find((o) => o.kind === choice.kind && (o.kind === 'shot' || o.target === choice.target))
       || { kind: choice.kind, target: choice.target, value: 0 };
     this.options = options;
@@ -504,7 +609,7 @@ export class Rep {
         ball.kick(from, pt, speed, lofted ? dist * 0.09 * k : 0);
         target = worst;
       } else {
-        outcome = chosen.space < 0.25 ? 'tight' : 'completed';
+        outcome = (chosen.space < 0.25 || (this.keeper && lofted && chosen.space < 0.4)) ? 'tight' : 'completed';
         const land = t.pos.clone().addScaledVector(t.vel, dist / speed * 0.5);
         ball.kick(from, land, speed, lofted ? dist * 0.09 : 0);
         target = t;
@@ -530,24 +635,28 @@ export class Rep {
     this.outcome = outcome;
     this.outcomeTarget = target;
     this.state = 'outcome';
-    this.outcomeT = 2.2;
+    this.outcomeT = this.outcomeLen;
+    this.outcomeAge = 0;
     w.setLine(w.choiceLine, null, null);
   }
 
+  loseSpot(presser) { return presser.pos.clone().add(new THREE.Vector3(-8, 0, rand(-4, 4))); }
+
   lose(presser) {
-    this.options = evaluateOptions(this.world.ball.pos.clone(), this.mates, this.away, this.role.group);
+    this.options = this.evaluate(this.world.ball.pos);
     this.chosen = null;
     this.decisionScore = 0;
     this.decideTime = this.decideT;
     this.outcome = 'lost';
     this.outcomeTarget = presser;
     const ball = this.world.ball;
-    const away = presser.pos.clone().add(new THREE.Vector3(-8, 0, rand(-4, 4)));
+    const away = this.loseSpot(presser);
     ball.kick(ball.pos.clone(), away, 7, 0);
     presser.target.copy(away);
     this.events.push({ t: this.t, type: 'lost' });
     this.state = 'outcome';
-    this.outcomeT = 2;
+    this.outcomeT = this.outcomeLen - 0.2;
+    this.outcomeAge = 0;
     this.world.clearOverlays();
     this.fx.groan?.();
   }
@@ -566,6 +675,7 @@ export class Rep {
     else if (this.outcome !== 'lost') this.fx.groan?.();
     this.result = {
       role: this.roleKey,
+      drill: this.drillKey,
       scans,
       scanTarget: d.scanTarget,
       scanRate: scans / (this.scanWindow || 1),

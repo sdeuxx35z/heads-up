@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { XRControllerModelFactory } from 'three/examples/jsm/webxr/XRControllerModelFactory.js';
 import { buildStadium } from './stadium.js';
 import { World } from './world.js';
-import { Rep } from './rep.js';
+import { DRILLS } from './drills.js';
 import { Panel, Pointer } from './ui.js';
 import { Audio } from './audio.js';
 import { store } from './store.js';
@@ -11,6 +11,8 @@ import * as S from './screens.js';
 import { makeQuiz, quizScreen } from './quiz.js';
 
 const DESK_EYE = 1.7;
+const XR_OPTS = { optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'] };
+const APP_MODE = new URLSearchParams(location.search).has('app') || matchMedia('(display-mode: standalone)').matches;
 
 class App {
   constructor() {
@@ -37,6 +39,7 @@ class App {
 
     this.panel = new Panel(this.scene, 1280, 800, 2.0);
     this.bar = new Panel(this.scene, 1280, 430, 1.5);
+    this.hint = new Panel(this.scene, 1100, 170, 1.4);
     this.pointer.panels.push(this.panel, this.bar);
 
     // black-out sphere for fades and quizzes
@@ -47,7 +50,7 @@ class App {
 
     this.screen = 'home';
     this.careerStage = 0;
-    this.practiceOpts = { role: 'CM', difficulty: 'MEDIUM', quiz: 'QUIZ SOME', reps: 10 };
+    this.practiceOpts = { drill: 'match', role: 'CM', difficulty: 'MEDIUM', quiz: 'QUIZ SOME', reps: 10 };
     this.session = null;
     this.mode = 'boot';
     this.inXR = false;
@@ -89,14 +92,16 @@ class App {
       if (down && !this.inXR) {
         const dx = e.movementX, dy = e.movementY;
         down.moved += Math.abs(dx) + Math.abs(dy);
-        if (down.moved > 6) {
+        if (down.moved > 14) {
           this.look.yaw -= dx * 0.004;
           this.look.pitch = THREE.MathUtils.clamp(this.look.pitch - dy * 0.004, -1.35, 1.2);
         }
       }
     });
     el.addEventListener('pointerup', () => {
-      if (down && down.moved <= 6) this.select(this.mouseRay());
+      // on a headset browser any tap goes into VR; the Quest laser jitters too much to tell taps from drags
+      if (this.xrSupported && !this.inXR) { down = null; this.enterVR(); return; }
+      if (down && down.moved <= 14) this.select(this.mouseRay());
       down = null;
     });
     addEventListener('keydown', (e) => {
@@ -121,8 +126,19 @@ class App {
       navigator.xr.isSessionSupported('immersive-vr').then((ok) => {
         this.xrSupported = ok;
         document.body.classList.toggle('desk', !ok);
+        document.body.classList.toggle('vr-ready', ok);
         this.redraw();
+        if (!ok) return;
+        // launched from the app icon: go straight in
+        if (APP_MODE) this.enterVR();
+        // Quest Browser can show its own Enter VR prompt
+        if (navigator.xr.offerSession) {
+          navigator.xr.offerSession('immersive-vr', XR_OPTS).then((s) => this.useSession(s)).catch(() => {});
+        }
       }).catch(() => {});
+      // following a link from inside VR keeps you in VR
+      navigator.xr.addEventListener?.('sessiongranted', () => this.enterVR());
+      document.getElementById('enter')?.addEventListener('click', () => this.enterVR());
     } else document.body.classList.add('desk');
 
     const factory = new XRControllerModelFactory();
@@ -157,7 +173,12 @@ class App {
       this.camera.rotation.set(0, 0, 0);
       this.applySettings();
       // re-anchor once the headset pose is known
-      setTimeout(() => { this.applySettings(); this.reanchor(); }, 400);
+      setTimeout(() => {
+        this.applySettings();
+        this.reanchor();
+        // first time in the headset: learn by playing
+        if (!store.data.tutorialDone && this.mode === 'menu') this.startTutorial();
+      }, 400);
       this.renderer.xr.getReferenceSpace()?.addEventListener('reset', () => this.reanchor());
       this.redraw();
     });
@@ -173,14 +194,22 @@ class App {
   }
 
   async enterVR() {
-    if (!navigator.xr || this.inXR) return;
+    if (!navigator.xr || this.inXR || this.entering) return;
     this.audio.unlock();
+    this.entering = true;
     try {
-      const session = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'] });
-      await this.renderer.xr.setSession(session);
+      await this.useSession(await navigator.xr.requestSession('immersive-vr', XR_OPTS));
     } catch (err) {
       console.warn('VR failed', err);
+      const n = document.getElementById('vrerr');
+      if (n) { n.textContent = `VR DIDN'T START: ${err.message || err}`; n.hidden = false; }
     }
+    this.entering = false;
+  }
+
+  async useSession(session) {
+    if (this.inXR) return;
+    await this.renderer.xr.setSession(session);
   }
 
   ctrlRay(c) {
@@ -287,6 +316,7 @@ class App {
     const fromMenu = this.mode === 'menu';
     this.screen = name;
     this.mode = 'menu';
+    this.hideHint();
     this.rep = null;
     this.quiz = null;
     this.session = null;
@@ -309,16 +339,54 @@ class App {
 
   startCareer(level) {
     const l = CAREER[level];
-    this.beginSession({ level, role: l.role, difficulty: l.difficulty, reps: l.reps, quizChance: l.quizChance });
+    this.beginSession({ level, role: l.role, difficulty: l.difficulty, reps: l.reps, quizChance: l.quizChance, drill: l.drill });
   }
 
   startPractice() {
     const p = this.practiceOpts;
     const quizChance = { 'QUIZ OFF': 0, 'QUIZ SOME': 0.3, 'QUIZ EVERY REP': 1 }[p.quiz];
-    this.beginSession({ level: null, role: p.role, difficulty: p.difficulty, reps: p.reps, quizChance });
+    this.beginSession({ level: null, role: p.role, difficulty: p.difficulty, reps: p.reps, quizChance, drill: p.drill });
   }
 
   again() { this.beginSession({ ...this.lastSessionOpts }); }
+
+  // three easy reps with prompts; the first one waits for the pass
+  startTutorial() {
+    this.beginSession({ level: null, role: 'CM', difficulty: 'EASY', reps: 3, quizChance: 0, tutorial: true });
+  }
+
+  tutorialStep() {
+    const s = this.session, rep = this.rep;
+    if (!s?.tutorial || !rep) return;
+    if (s.index === 0 && rep.state === 'decide') rep.decideT = 0;
+    const scans = rep.scans.length + (rep.inScan ? 1 : 0);
+    const pass = this.inXR ? 'POINT AT A TEAMMATE · PULL THE TRIGGER' : 'CLICK A TEAMMATE TO PASS';
+    let text = null;
+    if (rep.state === 'buildup') text = scans === 0 ? (s.index === 0 ? 'LOOK OVER YOUR SHOULDER' : null) : `SCANS ${scans}`;
+    else if (rep.state === 'incoming' || rep.state === 'decide') text = s.index < 2 ? pass : null;
+    if (s.index === 2) text = rep.state === 'buildup' && scans ? `SCANS ${scans}` : null;
+    if (text === this.hintText) return;
+    this.hintText = text;
+    if (!text) { this.hint.hide(); return; }
+    this.hint.show((k) => {
+      k.bg(60);
+      k.text(text, k.w / 2, k.h / 2 + 4, 76, { align: 'center', base: 'middle', weight: 800 });
+    });
+    if (!this.hintPlaced) {
+      this.hintPlaced = true;
+      this.hint.placeFacing(this.headPos(), this.world.headYaw(), 3.2, 0.75);
+    }
+  }
+
+  // stereo position and distance of the ball relative to the head
+  ballPan() {
+    const b = this.world.ball.pos, h = this.headPos();
+    const yaw = this.world.headYaw();
+    const ang = Math.atan2(b.x - h.x, b.z - h.z) - yaw;
+    return [-Math.sin(ang), Math.hypot(b.x - h.x, b.z - h.z)];
+  }
+
+  hideHint() { this.hint.hide(); this.hintText = null; this.hintPlaced = false; }
 
   beginSession(opts) {
     this.lastSessionOpts = opts;
@@ -331,15 +399,17 @@ class App {
     const s = this.session;
     // guarantee at least one quiz in a memory-heavy session
     const quiz = s.quizChance >= 1 || Math.random() < s.quizChance || (s.quizChance > 0.5 && s.index === s.reps - 1 && !s.results.some((r) => r.memory != null));
-    this.rep = new Rep(this.world, {
+    const Drill = DRILLS[s.drill || 'match'];
+    this.rep = new Drill(this.world, {
       role: s.role, difficulty: s.difficulty, quiz, motion: store.settings.motion,
       fx: {
-        kick: (p) => this.audio.kick(p), touch: () => this.audio.touch(), tick: () => this.audio.tick(),
+        kick: (p) => this.audio.kick(p, ...this.ballPan()), touch: () => this.audio.touch(...this.ballPan()), tick: () => this.audio.tick(),
         whistle: () => this.audio.whistle(), cheer: (k) => this.audio.cheer(k), groan: () => this.audio.groan(), ui: () => this.audio.ui(),
       },
     });
     this.mode = 'play';
     this.panel.hide();
+    this.hideHint();
     this.quiz = null;
     this.setFade(1, true);
     this.rep.start();
@@ -390,6 +460,7 @@ class App {
   }
 
   showCard() {
+    this.hideHint();
     const s = this.session, r = this.rep.result;
     s.results.push(r);
     this.mode = 'card';
@@ -422,6 +493,7 @@ class App {
       completed: rs.filter((r) => ['completed', 'tight', 'goal'].includes(r.outcome)).length,
     };
     store.recordSession(rec);
+    if (s.tutorial) { store.data.tutorialDone = true; store.save(); }
     const starsEarned = store.starsFor(rec.score);
     const next = s.level != null && s.level < CAREER.length - 1 && store.unlocked(s.level + 1) ? s.level + 1 : null;
     this.audio.whistle(true);
@@ -609,6 +681,7 @@ class App {
     if (this.mode === 'play' && this.rep) {
       if (this.holdT > 0) this.holdT -= dt;
       else this.rep.update(dt);
+      this.tutorialStep();
       const ray = this.activeRay();
       if (ray) this.rep.aim(ray.origin, ray.dir);
       if (this.rep.state === 'quiz' && !this.quiz) {
