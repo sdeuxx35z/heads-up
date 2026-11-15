@@ -3,7 +3,9 @@ import * as THREE from 'three';
 import { evaluateRondo, evaluateOptions, laneMargin } from './eval.js';
 import { ROLES, AWAY_442 } from './config.js';
 import { Rep } from './rep.js';
-import { RondoDrill, AwarenessDrill, DRILLS, perimeterPoint } from './drills.js';
+import { RondoDrill, AwarenessDrill, DRILLS, DRILL_NAMES, DRILL_KEYS, perimeterPoint } from './drills.js';
+import { SCENARIOS, SCENARIO_NAMES } from './scenarios.js';
+import { makeQuiz, quizScreen } from './quiz.js';
 
 const P = (x: number, z: number) => ({ pos: { x, y: 0, z }, slot: 'CM' });
 
@@ -150,8 +152,8 @@ test('awareness: cue fires, snapshot carries it, quiz always asked', () => {
   }
   expect(rep.state).toBe('quiz');
   snap = rep.snapshot;
-  expect([0, 1, 2]).toContain(snap.cueColor);
-  expect(snap.cue.colors.length).toBe(3);
+  expect([0, 1, 2, 3, 4]).toContain(snap.cueColor);
+  expect(snap.cue.colors.length).toBe(5);
   expect(snap.cue.color).toBe(snap.cueColor);
   expect(typeof snap.cueSeen).toBe('boolean');
   expect(shown).toBeGreaterThan(0.7);
@@ -199,5 +201,184 @@ test('big dt is sliced and clock-free', () => {
 
 test('DRILLS map', () => {
   expect(DRILLS.match).toBe(Rep);
-  expect(Object.keys(DRILLS)).toEqual(['match', 'rondo', 'awareness']);
+  expect(Object.keys(DRILLS).slice(0, 3)).toEqual(['match', 'rondo', 'awareness']);
+  for (const k of Object.keys(SCENARIOS)) {
+    expect(DRILLS[k]).toBe((SCENARIOS as any)[k]);
+    expect(DRILL_NAMES[k]).toBe((SCENARIO_NAMES as any)[k]);
+    expect(DRILL_KEYS).toContain(k);
+  }
+});
+
+// --- rondo: mates slide, game speed is respected ------------------------------------------------
+test('rondo: the four mates slide along the edges and stay spaced', () => {
+  const w = makeWorld();
+  const rep: any = new RondoDrill(w, { role: 'CM', difficulty: 'MEDIUM', quiz: false, motion: false, fx });
+  rep.start();
+  const c = rep.centre;
+  const start = rep.mates.map((m: any) => m.pos.clone());
+  let moved = 0, minGap = Infinity;
+  for (let i = 0; i < 60 && rep.state !== 'incoming'; i++) {
+    rep.update(1 / 30);
+    rep.mates.forEach((m: any, k: number) => {
+      moved = Math.max(moved, m.pos.distanceTo(start[k]));
+      // still on the square's edge (a little sway allowed)
+      const edge = Math.max(Math.abs(m.pos.x - c.x), Math.abs(m.pos.z - c.z));
+      expect(Math.abs(edge - 6)).toBeLessThan(0.7);
+    });
+    for (let a = 0; a < 4; a++) for (let b = a + 1; b < 4; b++) minGap = Math.min(minGap, rep.mates[a].pos.distanceTo(rep.mates[b].pos));
+  }
+  expect(rep.mateS.some((s: number, k: number) => Math.abs(s - rep.homeS[k]) > 0.4)).toBe(true);
+  expect(minGap).toBeGreaterThan(2.5);
+});
+
+test('rondo: the ball goes round two or three times before it reaches the viewer, in short windows', () => {
+  for (let n = 0; n < 12; n++) {
+    const w = makeWorld();
+    const rep: any = new RondoDrill(w, { role: 'CM', difficulty: 'MEDIUM', quiz: false, motion: false, fx });
+    rep.start();
+    let passes = 0;
+    for (let i = 0; i < 600 && rep.state !== 'decide'; i++) {
+      rep.update(1 / 30);
+    }
+    passes = rep.events.filter((e: any) => e.type === 'pass').length;
+    expect(passes).toBeGreaterThanOrEqual(2);
+    expect(passes).toBeLessThanOrEqual(3);
+    expect(rep.window).toBeLessThan(1.6);
+  }
+});
+
+test('rondo: respects the game speed', () => {
+  const timeToViewer = (speed: number) => {
+    let sum = 0;
+    for (let n = 0; n < 10; n++) {
+      const w = makeWorld();
+      const rep: any = new RondoDrill(w, { role: 'CM', difficulty: 'MEDIUM', quiz: false, motion: false, fx, speed });
+      rep.start();
+      for (let i = 0; i < 2000 && rep.state !== 'decide'; i++) rep.update(1 / 30);
+      sum += rep.t + rep.window * 0.0;
+      expect(rep.window).toBeCloseTo(((1.9 + 0.4) * 0.5) / speed, 0);
+    }
+    return sum / 10;
+  };
+  expect(timeToViewer(0.5)).toBeGreaterThan(timeToViewer(1.2) * 1.5);
+});
+
+// --- awareness: five colours and a position question ---------------------------------------------
+test('awareness: both questions come up, the spot question has four map spots and one is right', () => {
+  const modes = new Set<string>();
+  for (let n = 0; n < 30; n++) {
+    const w = makeWorld();
+    const rep: any = new AwarenessDrill(w, { role: 'CM', difficulty: 'MEDIUM', quiz: false, motion: false, fx });
+    rep.start();
+    if (n % 2) rep.cueMode = 'spot'; else rep.cueMode = 'colour';
+    let flashAt: any = null;
+    for (let i = 0; i < 3000 && rep.state !== 'quiz'; i++) {
+      rep.update(1 / 30);
+      if (!flashAt && rep.cueState === 1) flashAt = { x: rep.cueP.pos.x, z: rep.cueP.pos.z };
+    }
+    const snap = rep.snapshot;
+    const q = makeQuiz(snap);
+    modes.add(q.type);
+    expect(snap.cue.colors.length).toBe(5);
+    expect(new Set(snap.cue.colors).size).toBe(5);
+    if (n % 2) {
+      expect(q.type).toBe('cuepos');
+      const s = snap.cue.spots;
+      expect(s.length).toBe(4);
+      expect(snap.cue.spot).toBeGreaterThanOrEqual(0);
+      expect(snap.cue.spot).toBeLessThan(4);
+      for (let a = 0; a < 4; a++) for (let b = a + 1; b < 4; b++) expect(Math.hypot(s[a].x - s[b].x, s[a].z - s[b].z)).toBeGreaterThan(6.5);
+      // the right spot is where the flashing player stood when it flashed (he has drifted since)
+      expect(Math.hypot(s[snap.cue.spot].x - flashAt.x, s[snap.cue.spot].z - flashAt.z)).toBeLessThan(0.8);
+      // and every spot is on the quiz map: 44 m square round the viewer
+      for (const p of s) { expect(Math.abs(p.x - snap.user.x)).toBeLessThan(22); expect(Math.abs(p.z - snap.user.z)).toBeLessThan(22); }
+    } else expect(q.type).toBe('cue');
+  }
+  expect([...modes].sort()).toEqual(['cue', 'cuepos']);
+});
+
+test('awareness: the mode is random, about half and half', () => {
+  const c = { colour: 0, spot: 0 };
+  for (let n = 0; n < 200; n++) {
+    const rep: any = new AwarenessDrill(makeWorld(), { role: 'CM', difficulty: 'EASY', quiz: false, motion: false, fx });
+    rep.start();
+    (c as any)[rep.cueMode]++;
+  }
+  expect(c.colour).toBeGreaterThan(60);
+  expect(c.spot).toBeGreaterThan(60);
+});
+
+// --- quiz screens: the two cue questions draw and answer ------------------------------------------
+function quizKit() {
+  const hits: any[] = [], texts: string[] = [];
+  const g: any = new Proxy({}, {
+    get: (_t, k: string) => (k === 'createLinearGradient' ? () => ({ addColorStop() {} }) : k === 'measureText' ? () => ({ width: 10 }) : () => {}),
+    set: () => true,
+  });
+  const kit: any = {
+    g, w: 1280, h: 800, hits, texts,
+    bg() {}, card() {}, rr() {}, hovered: () => false,
+    text(s: string) { texts.push(s); return 0; },
+    button(id: string, x: number, y: number, w: number, h: number, label: string, o: any) { hits.push({ id, onClick: o?.onClick }); },
+    hit(id: string, x: number, y: number, w: number, h: number, fn: any) { hits.push({ id, x, y, w, h, onClick: fn }); },
+  };
+  return kit;
+}
+function cueSnap(mode: 'colour' | 'spot') {
+  const w = makeWorld();
+  const rep: any = new AwarenessDrill(w, { role: 'CM', difficulty: 'MEDIUM', quiz: false, motion: false, fx });
+  rep.start();
+  rep.cueMode = mode;
+  for (let i = 0; i < 3000 && rep.state !== 'quiz'; i++) rep.update(1 / 30);
+  return rep.snapshot;
+}
+test('quiz: the colour question has five answers and scores 100 or 0', () => {
+  const snap = cueSnap('colour');
+  const scores: number[] = [];
+  const app = { answerQuiz: (s: number) => scores.push(s) };
+  const q = makeQuiz(snap);
+  const kit = quizKit();
+  quizScreen(app, q)(kit);
+  expect(kit.hits.length).toBe(5);
+  expect(kit.texts).toContain('WHAT COLOUR FLASHED BEHIND YOU?');
+  expect(kit.texts.filter((t: string) => ['RED', 'YELLOW', 'GREEN', 'CYAN', 'PURPLE'].includes(t)).length).toBe(5);
+  kit.hits.forEach((h: any) => h.onClick());
+  expect(scores.sort()).toEqual([0, 0, 0, 0, 100]);
+  const k2 = quizKit();
+  q.answered = true; q.guess = 0; q.score = 0;
+  quizScreen(app, q)(k2);
+  expect(k2.hits.length).toBe(0);
+});
+
+test('quiz: the spot question has four lettered spots and one right answer', () => {
+  const snap = cueSnap('spot');
+  const scores: number[] = [];
+  const app = { answerQuiz: (s: number) => scores.push(s) };
+  const q = makeQuiz(snap);
+  expect(q.type).toBe('cuepos');
+  const kit = quizKit();
+  quizScreen(app, q)(kit);
+  expect(kit.hits.length).toBe(4);
+  expect(kit.texts).toContain('WHERE DID IT FLASH?');
+  expect(['A', 'B', 'C', 'D'].every((l) => kit.texts.includes(l))).toBe(true);
+  kit.hits.forEach((h: any) => h.onClick());
+  expect(scores.sort()).toEqual([0, 0, 0, 100]);
+  const k2 = quizKit();
+  q.answered = true; q.guess = 1; q.score = 0;
+  quizScreen(app, q)(k2);
+  expect(k2.hits.length).toBe(0);
+});
+
+test('quiz: the old questions still draw', () => {
+  const w = makeWorld();
+  const rep: any = new Rep(w, { role: 'CM', difficulty: 'MEDIUM', quiz: true, motion: false, fx });
+  rep.start();
+  for (let i = 0; i < 3000 && rep.state !== 'quiz'; i++) rep.update(1 / 30);
+  for (let n = 0; n < 12; n++) {
+    const q = makeQuiz(rep.snapshot);
+    expect(['nearest', 'count', 'free']).toContain(q.type);
+    const kit = quizKit();
+    quizScreen({ answerQuiz() {} }, q)(kit);
+    expect(kit.hits.length).toBeGreaterThan(0);
+  }
 });

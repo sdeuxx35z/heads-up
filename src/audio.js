@@ -18,6 +18,12 @@ export class Audio {
     this.crowd();
   }
 
+  // crowd bed level: muffled in the locker room, full in the stadium
+  setCrowd(v) {
+    if (!this.crowdGain) return;
+    this.crowdGain.gain.setTargetAtTime(v, this.ctx.currentTime, 0.4);
+  }
+
   setVolume(v) {
     this.volume = v;
     if (this.master) this.master.gain.value = v;
@@ -184,6 +190,22 @@ export class Audio {
     g.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
     o.connect(g).connect(this.master);
     o.start(t); o.stop(t + 0.09);
+  }
+
+  // two quick high tones: something just changed, react
+  alert() {
+    if (!this.ctx) return;
+    const c = this.ctx, t = c.currentTime;
+    for (const [dt, f] of [[0, 1760], [0.11, 2093]]) {
+      const o = c.createOscillator();
+      o.type = 'square'; o.frequency.value = f;
+      const g = c.createGain();
+      g.gain.setValueAtTime(0.0001, t + dt);
+      g.gain.exponentialRampToValueAtTime(0.09, t + dt + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dt + 0.09);
+      o.connect(g).connect(this.master);
+      o.start(t + dt); o.stop(t + dt + 0.1);
+    }
   }
 
   ui() {

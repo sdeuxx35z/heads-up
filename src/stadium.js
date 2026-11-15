@@ -51,19 +51,19 @@ function pitchTexture() {
   return t;
 }
 
-function goal(scene, side) {
+function goal(parent, side) {
   const mat = new THREE.MeshLambertMaterial({ color: 0xf4f4ef });
   const r = 0.06, gx = side * GOAL.x;
   const post = new THREE.CylinderGeometry(r, r, GOAL.height, 10);
   for (const z of [-GOAL.halfWidth, GOAL.halfWidth]) {
     const p = new THREE.Mesh(post, mat);
     p.position.set(gx, GOAL.height / 2, z);
-    scene.add(p);
+    parent.add(p);
   }
   const bar = new THREE.Mesh(new THREE.CylinderGeometry(r, r, GOAL.halfWidth * 2, 10), mat);
   bar.rotation.x = Math.PI / 2;
   bar.position.set(gx, GOAL.height, 0);
-  scene.add(bar);
+  parent.add(bar);
   // net: a box of lines
   const depth = 2, pts = [];
   const bx = gx + side * depth;
@@ -77,10 +77,10 @@ function goal(scene, side) {
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
-  scene.add(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0xdedfd8, transparent: true, opacity: 0.45 })));
+  parent.add(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0xdedfd8, transparent: true, opacity: 0.45 })));
 }
 
-function stands(scene) {
+function stands(parent) {
   const concrete = new THREE.MeshLambertMaterial({ color: 0x2a2d31 });
   const roofMat = new THREE.MeshLambertMaterial({ color: 0x15171a });
   const crowdGeo = new THREE.BoxGeometry(0.45, 0.6, 0.35);
@@ -113,7 +113,7 @@ function stands(scene) {
     const back = new THREE.Mesh(new THREE.BoxGeometry(s.len, high + 8, 0.5), roofMat);
     back.position.set(0, (high + 8) / 2, -deep - 0.6);
     grp.add(back);
-    scene.add(grp);
+    parent.add(grp);
     grp.updateMatrixWorld();
     for (let r = 0; r < rows; r++) {
       for (let x = -s.len / 2 + 0.5; x < s.len / 2 - 0.5; x += 0.55) {
@@ -132,26 +132,26 @@ function stands(scene) {
     crowd.setMatrixAt(i, m);
     crowd.setColorAt(i, col.setHex(palette[(Math.random() * palette.length) | 0]).multiplyScalar(0.55 + Math.random() * 0.45));
   });
-  scene.add(crowd);
+  parent.add(crowd);
   return crowd;
 }
 
-function floodlights(scene) {
+function floodlights(parent) {
   const poleMat = new THREE.MeshLambertMaterial({ color: 0x3a3d42 });
   const lampMat = new THREE.MeshBasicMaterial({ color: 0xfffbea });
   for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
     const x = sx * (PITCH.HL + 14), z = sz * (PITCH.HW + 26);
     const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.8, 42, 8), poleMat);
     pole.position.set(x, 21, z);
-    scene.add(pole);
+    parent.add(pole);
     const head = new THREE.Mesh(new THREE.BoxGeometry(8, 4, 0.6), lampMat);
     head.position.set(x, 43, z);
     head.lookAt(0, 0, 0);
-    scene.add(head);
+    parent.add(head);
   }
 }
 
-function boards(scene) {
+function boards(parent) {
   const c = document.createElement('canvas');
   c.width = 1024; c.height = 64;
   const g = c.getContext('2d');
@@ -168,7 +168,7 @@ function boards(scene) {
     const t = tex.clone(); t.needsUpdate = true; t.repeat.set(len / 40, 1);
     const b = new THREE.Mesh(new THREE.PlaneGeometry(len, 0.9), new THREE.MeshBasicMaterial({ map: t }));
     b.position.set(x, 0.45, z); b.rotation.y = rot;
-    scene.add(b);
+    parent.add(b);
   };
   mk(PITCH.L, 0, -(PITCH.HW + 4), 0);
   mk(PITCH.L, 0, PITCH.HW + 4, Math.PI);
@@ -177,13 +177,34 @@ function boards(scene) {
   mat.dispose();
 }
 
+// Backdrop + fog per scene "mode". The locker room is a dark warm interior with no fog.
+const ENV = {
+  stadium: { bg: 0x07090b, fog: { color: 0x07090b, near: 120, far: 260 } },
+  locker: { bg: 0x0d0a08, fog: null },
+};
+
+/** Switch scene.background / scene.fog between 'stadium' and 'locker'. */
+export function setEnvironment(scene, mode = 'stadium') {
+  const e = ENV[mode] || ENV.stadium;
+  scene.background = new THREE.Color(e.bg);
+  scene.fog = e.fog ? new THREE.Fog(e.fog.color, e.fog.near, e.fog.far) : null;
+}
+
+/**
+ * Builds the night stadium. Every mesh and light it adds lives under the returned group, so
+ * `stadium.group.visible = false` hides the whole stadium (lights included).
+ * Returns { group, lights, crowd, setEnvironment(mode) }.
+ */
 export function buildStadium(scene) {
-  scene.background = new THREE.Color(0x07090b);
-  scene.fog = new THREE.Fog(0x07090b, 120, 260);
-  scene.add(new THREE.HemisphereLight(0xdfe6ee, 0x1c2a18, 1.15));
+  const group = new THREE.Group();
+  group.name = 'stadium';
+  scene.add(group);
+  setEnvironment(scene, 'stadium');
+
+  const hemi = new THREE.HemisphereLight(0xdfe6ee, 0x1c2a18, 1.15);
   const sun = new THREE.DirectionalLight(0xfff6e6, 1.6);
   sun.position.set(-30, 60, 20);
-  scene.add(sun);
+  group.add(hemi, sun);
 
   const tex = pitchTexture();
   const ground = new THREE.Mesh(
@@ -191,14 +212,16 @@ export function buildStadium(scene) {
     new THREE.MeshLambertMaterial({ map: tex }),
   );
   ground.rotation.x = -Math.PI / 2;
-  scene.add(ground);
+  group.add(ground);
   const outer = new THREE.Mesh(new THREE.PlaneGeometry(400, 400), new THREE.MeshLambertMaterial({ color: 0x1a2a19 }));
   outer.rotation.x = -Math.PI / 2;
   outer.position.y = -0.02;
-  scene.add(outer);
+  group.add(outer);
 
-  goal(scene, 1); goal(scene, -1);
-  stands(scene);
-  floodlights(scene);
-  boards(scene);
+  goal(group, 1); goal(group, -1);
+  const crowd = stands(group);
+  floodlights(group);
+  boards(group);
+
+  return { group, lights: [hemi, sun], crowd, setEnvironment: (mode) => setEnvironment(scene, mode) };
 }

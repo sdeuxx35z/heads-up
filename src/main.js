@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { XRControllerModelFactory } from 'three/examples/jsm/webxr/XRControllerModelFactory.js';
 import { buildStadium } from './stadium.js';
+import { LockerRoom } from './locker.js';
 import { World } from './world.js';
 import { DRILLS } from './drills.js';
 import { Panel, Pointer } from './ui.js';
@@ -9,8 +10,10 @@ import { store } from './store.js';
 import { CAREER } from './config.js';
 import * as S from './screens.js';
 import { makeQuiz, quizScreen } from './quiz.js';
+import { sessionMetrics, checkObjective, nextLesson, dailyDrill, weakSpot } from './career.js';
 
 const DESK_EYE = 1.7;
+const _v1 = new THREE.Vector3();
 const XR_OPTS = { optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'] };
 const APP_MODE = new URLSearchParams(location.search).has('app') || matchMedia('(display-mode: standalone)').matches;
 
@@ -32,7 +35,7 @@ class App {
     this.rig = new THREE.Group();
     this.rig.add(this.camera);
     this.scene.add(this.rig);
-    buildStadium(this.scene);
+    this.stadium = buildStadium(this.scene);
     this.world = new World(this.scene, this.rig, this.camera);
     this.audio = new Audio();
     this.pointer = new Pointer();
@@ -40,6 +43,29 @@ class App {
     this.panel = new Panel(this.scene, 1280, 800, 2.0);
     this.bar = new Panel(this.scene, 1280, 430, 1.5);
     this.hint = new Panel(this.scene, 1100, 170, 1.4);
+
+    // the locker room hub: live screens mounted on its boards, the room's objects are the buttons
+    this.locker = new LockerRoom(this.scene);
+    this.inLocker = false;
+    const mount = (m, w, h, aspect) => {
+      const mw = Math.min(m.userData.maxWidth || m.userData.width, (m.userData.maxHeight || m.userData.height) * aspect);
+      const p = new Panel(this.scene, w, h, mw * 0.96);
+      // on a wall: depth-tested and drawn under the floating panel
+      p.mesh.material.depthTest = true;
+      p.mesh.renderOrder = 2;
+      m.add(p.mesh);
+      p.mesh.position.set(0, 0, 0.01);
+      this.pointer.panels.push(p);
+      return p;
+    };
+    // a waist-high CONTINUE in front of your locker, so the first thing you can do is play
+    this.hub = new Panel(this.scene, 1100, 190, 1.15);
+    this.pointer.panels.push(this.hub);
+    this.boards = {
+      career: mount(this.locker.mounts.career, 1280, 800, 1.6),
+      notice: mount(this.locker.mounts.notice, 1024, 768, 4 / 3),
+      stats: mount(this.locker.mounts.stats, 1280, 720, 16 / 9),
+    };
     this.pointer.panels.push(this.panel, this.bar);
 
     // black-out sphere for fades and quizzes
@@ -165,7 +191,6 @@ class App {
       c.addEventListener('disconnected', () => { c.userData.connected = false; });
       c.addEventListener('selectstart', () => { this.activeCtrl = i; this.audio.unlock(); c.userData.heldSince = performance.now(); this.select(this.ctrlRay(c)); });
       c.addEventListener('selectend', () => { c.userData.heldSince = null; });
-      c.addEventListener('squeezestart', () => this.pauseGame());
       this.rig.add(c);
       const grip = this.renderer.xr.getControllerGrip(i);
       grip.add(factory.createControllerModel(grip));
@@ -247,6 +272,8 @@ class App {
     const hit = this.pointer.hitPanels(ray.origin, ray.dir);
     if (hit && hit.b) { this.audio.ui(); hit.b.onClick(hit.x, hit.y); return; }
     if (hit) return;
+    const obj = this.pickLocker(ray);
+    if (obj && ['menu', 'summary'].includes(this.mode)) { this.lockerAction(obj.userData.action); return; }
     if (this.mode === 'play' && this.rep) {
       this.rep.aim(ray.origin, ray.dir);
       this.rep.select();
@@ -308,8 +335,8 @@ class App {
     g.fillStyle = grad;
     g.fillRect(0, 0, 256, 256);
     const tex = new THREE.CanvasTexture(c);
-    this.vignette = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.62), new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0, depthTest: false, depthWrite: false }));
-    this.vignette.position.z = -0.2;
+    this.vignette = new THREE.Mesh(new THREE.PlaneGeometry(3.1, 3.1), new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0, depthTest: false, depthWrite: false }));
+    this.vignette.position.z = -1;
     this.vignette.renderOrder = 8;
     this.vignette.visible = false;
     this.camera.add(this.vignette);
@@ -317,9 +344,11 @@ class App {
 
   // Left stick runs (click it in to sprint), right stick snap-turns. WASD + Shift on desktop.
   locomotion(dt) {
-    const rep = this.rep;
-    const canMove = this.mode === 'play' && rep && (rep.state === 'buildup' || rep.state === 'incoming');
-    let ix = 0, iy = 0, sprint = false, dirYaw = this.world.headYaw(), turn = 0;
+    const rep = this.rep, st = rep?.state;
+    const canRun = this.mode === 'play' && rep && (st === 'buildup' || st === 'incoming');
+    // with the ball at your feet you can still walk it a few steps
+    const canWalk = this.mode === 'play' && rep && st === 'decide';
+    let ix = 0, iy = 0, sprint = false, turn = 0, handYaw = null;
     if (this.inXR) {
       const session = this.renderer.xr.getSession();
       for (const src of session?.inputSources || []) {
@@ -327,13 +356,14 @@ class App {
         if (!gp || gp.axes.length < 4) continue;
         if (src.handedness === 'left') {
           ix = gp.axes[2]; iy = gp.axes[3];
-          sprint = !!gp.buttons[3]?.pressed || this.sprintLatch;
           // a stick click latches sprint until the stick is let go
           if (gp.buttons[3]?.pressed) this.sprintLatch = true;
+          sprint = !!this.sprintLatch;
           const c = this.controllers.find((k) => k.userData.source === src);
           if (c) {
-            const d = new THREE.Vector3(0, 0, -1).transformDirection(c.matrixWorld);
-            dirYaw = Math.atan2(d.x, d.z);
+            const d = _v1.set(0, 0, -1).transformDirection(c.matrixWorld);
+            // a ray pointing near straight up or down has no stable heading
+            if (Math.abs(d.y) < 0.77) handYaw = Math.atan2(d.x, d.z);
           }
         } else if (src.handedness === 'right') turn = gp.axes[2];
       }
@@ -343,48 +373,74 @@ class App {
       ix = (k.has('d') ? 1 : 0) - (k.has('a') ? 1 : 0);
       sprint = k.has('shift');
     }
-    // snap turn on the right stick, one step per flick
+
+    // snap turn on the right stick, one step per flick, with a short blink
     if (Math.abs(turn) > 0.7 && !this.turnHeld && ['play', 'menu', 'card', 'summary', 'replay'].includes(this.mode)) {
       this.turnHeld = true;
-      const step = (Math.sign(turn) * -Math.PI) / 6;
-      this.world.placeUser(this.world.userPos(), this.world.headYaw() + step);
+      this.world.placeUser(this.world.userPos(), this.world.headYaw() + (Math.sign(turn) * -Math.PI) / 6);
+      this.fade.material.opacity = Math.max(this.fade.material.opacity, 0.85);
+      this.world.snapTurned = true; // the scan tracker must ignore this yaw jump
     } else if (Math.abs(turn) < 0.3) this.turnHeld = false;
+
+    // run direction: the left hand, or a slowly-following body heading from the head
+    const headYaw = this.world.headYaw();
+    if (this.bodyYaw == null) this.bodyYaw = headYaw;
+    this.bodyYaw += Math.atan2(Math.sin(headYaw - this.bodyYaw), Math.cos(headYaw - this.bodyYaw)) * Math.min(1, dt / 0.6);
+    if (handYaw != null) this.lastHandYaw = handYaw;
+    const dirYaw = !this.inXR ? headYaw : store.settings.steer === 'head' ? this.bodyYaw : this.lastHandYaw ?? this.bodyYaw;
 
     let mag = Math.hypot(ix, iy);
     if (mag < 0.15) { mag = 0; this.sprintLatch = false; }
-    let target = 0;
-    if (canMove && mag > 0) {
-      target = (sprint ? 7.2 : 4) * Math.min(1, mag);
-      if (rep.state === 'incoming') target = Math.min(target, 3);
-    }
-    // ease in and out so starts and stops aren't a jolt
-    this.moveSpeed += (target - this.moveSpeed) * Math.min(1, dt * (target > this.moveSpeed ? 4 : 7));
-    if (this.moveSpeed > 0.05 && mag > 0 && canMove) {
-      const fx = Math.sin(dirYaw), fz = Math.cos(dirYaw); // forward
-      const rx = -Math.cos(dirYaw), rz = Math.sin(dirYaw); // right
+    const v = this.vel || (this.vel = { x: 0, z: 0 });
+    let wantX = 0, wantZ = 0;
+    if (mag > 0 && (canRun || canWalk)) {
+      let top = canWalk ? 1.5 : sprint ? 6.2 : 3.8;
+      if (st === 'incoming') top = Math.min(top, 3);
+      const sp = top * Math.min(1, mag);
+      const fx = Math.sin(dirYaw), fz = Math.cos(dirYaw);
+      const rx = -Math.cos(dirYaw), rz = Math.sin(dirYaw);
       let mx = fx * -iy + rx * ix, mz = fz * -iy + rz * ix;
       const l = Math.hypot(mx, mz) || 1;
-      mx /= l; mz /= l;
-      const u = this.world.userPos();
-      const nx = THREE.MathUtils.clamp(u.x + mx * this.moveSpeed * dt, -52, 52);
-      const nz = THREE.MathUtils.clamp(u.z + mz * this.moveSpeed * dt, -33.5, 33.5);
-      this.world.moveUser(nx - u.x, nz - u.z);
-      rep.motion = false; // you're running yourself now
-      this.stepClock -= dt * (1.6 + this.moveSpeed * 0.32);
-      if (this.stepClock <= 0) { this.stepClock = 1; this.audio.step(this.moveSpeed / 7.2); }
-    } else if (!canMove) this.moveSpeed = 0;
+      wantX = (mx / l) * sp; wantZ = (mz / l) * sp;
+    }
+    if (!['play', 'paused', 'quiz'].includes(this.mode)) { v.x = v.z = 0; }
+    // linear ramps (6 m/s² up, 12 m/s² down) instead of exponential easing that spikes at the start
+    const dvx = wantX - v.x, dvz = wantZ - v.z, dvl = Math.hypot(dvx, dvz);
+    const speeding = Math.hypot(wantX, wantZ) > Math.hypot(v.x, v.z);
+    const maxDv = (speeding ? 6 : 12) * dt;
+    const k = dvl > maxDv ? maxDv / dvl : 1;
+    const prevSpeed = Math.hypot(v.x, v.z);
+    if (this.mode !== 'paused' && this.mode !== 'quiz') { v.x += dvx * k; v.z += dvz * k; }
+    this.moveSpeed = Math.hypot(v.x, v.z);
+    const accel = Math.abs(this.moveSpeed - prevSpeed) / Math.max(dt, 1e-4);
 
-    // the ball is played to where you are now, not where you were when it was struck
-    if (rep?.state === 'incoming' && this.world.ball.flight) {
-      const f = this.world.ball.flight, u = this.world.userPos();
-      const from = f.from;
-      const dir = new THREE.Vector3(from.x - u.x, 0, from.z - u.z).normalize();
-      f.to.set(u.x + dir.x * 0.6, 0.11, u.z + dir.z * 0.6);
+    if (this.moveSpeed > 0.02 && this.mode === 'play') {
+      const u = this.world.userPos();
+      const nx = THREE.MathUtils.clamp(u.x + v.x * dt, -52, 52);
+      const nz = THREE.MathUtils.clamp(u.z + v.z * dt, -33.5, 33.5);
+      this.world.moveUser(nx - u.x, nz - u.z);
+      if (rep && mag > 0) rep.motion = false; // you're running yourself now
+      // dribble: the ball stays at your feet while you walk it
+      if (st === 'decide' && this.moveSpeed > 0.15) {
+        const s = 0.55 / this.moveSpeed;
+        this.world.ball.set(nx + v.x * s, nz + v.z * s);
+      }
+      this.stepClock -= dt * (1.6 + this.moveSpeed * 0.32);
+      if (this.stepClock <= 0) { this.stepClock = 1; this.audio.step(this.moveSpeed / 6.2); }
     }
 
+    // the ball is played to where you are now, not where you were when it was struck
+    if (st === 'incoming' && this.world.ball.flight) {
+      const f = this.world.ball.flight, u = this.world.userPos();
+      const dx = f.from.x - u.x, dz = f.from.z - u.z, dl = Math.hypot(dx, dz) || 1;
+      f.to.set(u.x + (dx / dl) * 0.6, 0.11, u.z + (dz / dl) * 0.6);
+    }
+
+    // vignette follows artificial motion only (speed and acceleration), never your own head turns
     const vm = this.vignette.material;
-    const want = store.settings.vignette !== false && this.inXR ? Math.min(0.9, this.moveSpeed / 7.2) : 0;
-    vm.opacity += (want - vm.opacity) * Math.min(1, dt * 6);
+    const want = store.settings.vignette !== false && this.inXR
+      ? Math.min(0.75, (this.moveSpeed / 6.2) * 0.45 + Math.min(1, accel / 6) * 0.3) : 0;
+    vm.opacity += (want - vm.opacity) * Math.min(1, dt * 8);
     this.vignette.visible = vm.opacity > 0.02;
   }
 
@@ -403,14 +459,18 @@ class App {
     for (const src of session.inputSources) {
       const b = src.gamepad?.buttons;
       if (!b) continue;
-      const pressed = (b[4]?.pressed || b[5]?.pressed);
+      // B / Y: hold briefly to pause, so a stray press mid-rep doesn't stop the game
+      const pressed = !!b[5]?.pressed;
       const key = src.handedness;
-      this.btnPrev = this.btnPrev || {};
-      if (pressed && !this.btnPrev[key]) {
-        if (this.mode === 'play' || this.mode === 'quiz') this.pauseGame();
-        else if (this.mode === 'paused') this.resume();
-      }
-      this.btnPrev[key] = pressed;
+      this.btnHeld = this.btnHeld || {};
+      if (pressed) {
+        this.btnHeld[key] = (this.btnHeld[key] || 0) + 1 / 72;
+        if (this.btnHeld[key] > 0.4 && this.btnHeld[key] < 1) {
+          this.btnHeld[key] = 1;
+          if (this.mode === 'play' || this.mode === 'quiz') this.pauseGame();
+          else if (this.mode === 'paused') this.resume();
+        }
+      } else this.btnHeld[key] = 0;
     }
   }
 
@@ -436,7 +496,77 @@ class App {
   }
 
   toMenuView() {
-    this.world.placeUser(new THREE.Vector3(0, 0, -37.5), 0);
+    this.enterLocker();
+    this.world.placeUser(this.locker.spawn.pos, this.locker.spawn.yaw);
+  }
+
+  enterLocker() {
+    if (this.inLocker) return;
+    this.inLocker = true;
+    this.stadium.group.visible = false;
+    this.stadium.setEnvironment('locker');
+    this.locker.show();
+    this.world.clearOverlays();
+    for (const p of [...this.world.homeSets.values()].flat().concat(this.world.away)) p.setVisible(false);
+    this.world.ball.mesh.visible = this.world.ball.shadow.visible = false;
+    this.chevrons.visible = this.goalMarker.visible = false;
+    this.audio.setCrowd?.(0.08);
+    this.refreshBoards();
+  }
+
+  leaveLocker() {
+    if (!this.inLocker) return;
+    this.inLocker = false;
+    this.locker.hide();
+    this.hub.hide();
+    for (const b of Object.values(this.boards)) b.mesh.visible = false;
+    this.stadium.group.visible = true;
+    this.stadium.setEnvironment('stadium');
+    this.world.ball.mesh.visible = this.world.ball.shadow.visible = true;
+    this.audio.setCrowd?.(0.22);
+  }
+
+  // what the room shows: name on the shirt, trophies for stages, the next lesson over the door
+  refreshBoards() {
+    if (!this.inLocker) return;
+    const p = store.profile;
+    this.locker.setProfile({ name: p.name, number: p.number, color: p.color });
+    const passed = p.passed.filter(Boolean).length;
+    this.locker.setTrophies(Math.min(8, Math.floor(passed / 3)));
+    const n = nextLesson(p);
+    this.locker.setNextLabel(p.passed.every(Boolean) ? 'CAREER COMPLETE' : `LESSON ${n + 1} · ${CAREER[n].name}`);
+    if (!this.careerStageSet) { this.careerStage = CAREER[n].stage; this.careerStageSet = true; }
+    this.boards.career.show(S.career(this, true));
+    this.boards.notice.show(S.today(this));
+    this.boards.stats.show(S.stats(this, true));
+    if (this.mode === 'menu' && this.screen === 'home') {
+      const label = p.passed.every(Boolean) ? 'CAREER COMPLETE' : `${String(n + 1).padStart(2, '0')} · ${CAREER[n].name}`;
+      this.hub.show((k) => {
+        k.button('go', 0, 0, k.w, k.h, 'CONTINUE', { primary: true, size: 70, r: 40, onClick: () => this.continueCareer() });
+        k.text(label, k.w - 44, k.h / 2 + 2, 40, { align: 'right', base: 'middle', color: '#111' });
+      });
+      const sp = this.locker.spawn;
+      this.hub.mesh.position.set(sp.pos.x + Math.sin(sp.yaw) * 1.5, (this.inXR ? this.headPos().y : 1.7) - 0.6, sp.pos.z + Math.cos(sp.yaw) * 1.5);
+      this.hub.mesh.rotation.set(-0.35, sp.yaw + Math.PI, 0, 'YXZ');
+    } else this.hub.hide();
+  }
+
+  lockerAction(action) {
+    this.audio.ui();
+    if (action === 'continue') return this.continueCareer();
+    if (action === 'practice') return this.go('practice');
+    if (action === 'settings') return this.go('settings');
+    if (action === 'career') return this.go('career');
+    if (action === 'stats') return this.go('stats');
+    if (action === 'notice') return this.startDaily();
+  }
+
+  pickLocker(ray) {
+    if (!this.inLocker || !this.locker.visible || !ray) return null;
+    this._lockerRay = this._lockerRay || new THREE.Raycaster();
+    this._lockerRay.set(ray.origin, ray.dir);
+    const hit = this._lockerRay.intersectObjects(this.locker.pickables, false)[0];
+    return hit && hit.distance < 12 ? hit.object : null;
   }
 
   reanchor() {
@@ -457,6 +587,7 @@ class App {
 
   go(name) {
     const fromMenu = this.mode === 'menu';
+    this.pendingAfter = null;
     this.screen = name;
     this.mode = 'menu';
     this.hideHint();
@@ -465,24 +596,47 @@ class App {
     this.session = null;
     this.endReplay();
     this.bar.hide();
-    this.panel.show(S[name](this));
-    if (!fromMenu) {
+    if (!fromMenu || !this.inLocker) {
       this.world.clearOverlays();
-      this.world.idle();
       this.toMenuView();
       this.setFade(1, true);
       this.setFade(0);
-      this.placePanel();
     }
+    this.refreshBoards();
+    // home is the room itself; everything else opens as a panel in front of you
+    if (name === 'home') this.panel.hide();
+    else { this.panel.show(S[name](this)); this.placePanel(); }
   }
 
-  redraw() { if (this.panel.mesh.visible) this.panel.redraw(); }
+  redraw() {
+    if (this.panel.mesh.visible) this.panel.redraw();
+    if (this.inLocker) for (const b of Object.values(this.boards)) b.redraw();
+  }
 
   // ---------- sessions
 
   startCareer(level) {
     const l = CAREER[level];
-    this.beginSession({ level, role: l.role, difficulty: l.difficulty, reps: l.reps, quizChance: l.quizChance, drill: l.drill });
+    this.beginSession({ level, role: l.role, difficulty: l.difficulty, reps: l.reps, quizChance: l.quizChance, drill: l.drill, drills: l.drills, roles: l.roles, speed: l.speed, minFlight: l.minFlight });
+  }
+
+  continueCareer() { this.startCareer(nextLesson(store.profile)); }
+
+  startDaily() { this.beginSession({ level: null, ...dailyDrill(store.profile) }); }
+
+  startWeakSpot() {
+    const w = weakSpot(store.profile);
+    if (!w) return this.continueCareer();
+    this.beginSession({ level: null, drill: w.drill, role: w.role, difficulty: 'MEDIUM', reps: 5, quizChance: 0, weak: w.key });
+  }
+
+  // a short controller buzz; Quest controllers expose hapticActuators on the gamepad
+  haptic(strength = 0.4, ms = 30) {
+    if (!this.inXR) return;
+    for (const src of this.renderer.xr.getSession()?.inputSources || []) {
+      const h = src.gamepad?.hapticActuators?.[0];
+      try { h?.pulse?.(strength, ms); } catch {}
+    }
   }
 
   startPractice() {
@@ -533,6 +687,7 @@ class App {
   hideHint() { this.hint.hide(); this.hintText = null; this.hintPlaced = false; }
 
   beginSession(opts) {
+    this.leaveLocker();
     this.lastSessionOpts = opts;
     this.session = { ...opts, index: 0, results: [] };
     this.panel.hide();
@@ -543,20 +698,27 @@ class App {
     const s = this.session;
     // guarantee at least one quiz in a memory-heavy session
     const quiz = s.quizChance >= 1 || Math.random() < s.quizChance || (s.quizChance > 0.5 && s.index === s.reps - 1 && !s.results.some((r) => r.memory != null));
-    const Drill = DRILLS[s.drill || 'match'];
+    // mixed sessions cycle through their drills and positions rep by rep
+    const drill = s.drills ? s.drills[s.index % s.drills.length] : s.drill || 'match';
+    const role = s.roles ? s.roles[s.index % s.roles.length] : s.role;
+    const Drill = DRILLS[drill] || DRILLS.match;
     this.rep = new Drill(this.world, {
-      role: s.role, difficulty: s.difficulty, quiz, motion: store.settings.motion,
+      role, difficulty: s.difficulty, quiz, motion: store.settings.motion, speed: s.speed || 1,
       fx: {
-        kick: (p) => this.audio.kick(p, ...this.ballPan()), touch: () => this.audio.touch(...this.ballPan()), tick: () => this.audio.tick(),
-        whistle: () => this.audio.whistle(), cheer: (k) => this.audio.cheer(k), groan: () => this.audio.groan(), ui: () => this.audio.ui(),
+        kick: (p) => this.audio.kick(p, ...this.ballPan()), touch: () => this.audio.touch(...this.ballPan()),
+        tick: () => { this.audio.tick(); this.haptic(0.25, 18); },
+        whistle: () => this.audio.whistle(), cheer: (k) => { this.audio.cheer(k); this.haptic(0.6, 60); }, groan: () => this.audio.groan(), ui: () => this.audio.ui(),
+        alert: () => { this.audio.alert(); this.haptic(0.8, 80); },
       },
     });
+    this.rep.drillKey = drill;
     this.mode = 'play';
     this.panel.hide();
     this.hideHint();
     this.quiz = null;
     this.setFade(1, true);
     this.rep.start();
+    if (s.minFlight) this.rep.minFlight = s.minFlight; // start() resets it
     this.look.pitch = 0;
     this.setFade(0);
     this.holdT = 0.6; // breathing room before the first pass
@@ -608,7 +770,8 @@ class App {
     const s = this.session, r = this.rep.result;
     s.results.push(r);
     this.mode = 'card';
-    this.cardCountdown = s.index + 1 < s.reps ? 6 : null;
+    // the card waits for you: in a head-turning game an auto-advance loses the lesson
+    this.cardCountdown = null;
     this.cardTimer = 0;
     this.drawCard();
     this.placePanel(-0.15, 2.2);
@@ -616,36 +779,52 @@ class App {
 
   drawCard() {
     const s = this.session;
-    this.panel.show(S.repCard(this, this.rep.result, s.index, s.reps, this.cardCountdown == null ? null : Math.ceil(this.cardCountdown)));
+    this.panel.show(S.repCard(this, this.rep.result, s.index, s.reps));
   }
 
   nextRep() {
     const s = this.session;
+    if (this.pendingAfter) return;
     this.endReplay();
     s.index++;
     if (s.index >= s.reps) return this.finishSession();
-    this.startRep();
+    // fade out before teleporting to the next spot, never cut
+    this.panel.hide();
+    this.setFade(1);
+    this.mode = 'between';
+    this.after(0.2, () => this.startRep());
   }
+
+  after(sec, fn) { this.pendingAfter = { t: sec, fn }; }
 
   finishSession() {
     const s = this.session, rs = s.results;
     const avg = (f) => { const v = rs.map(f).filter((x) => x != null); return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : null; };
+    const metrics = sessionMetrics(rs);
+    const lesson = s.level != null ? CAREER[s.level] : null;
+    const objective = checkObjective(lesson, metrics);
+    const prevBest = s.level != null ? store.profile.best[s.level] : null;
     const rec = {
-      date: Date.now(), level: s.level, role: s.role, difficulty: s.difficulty, reps: rs.length,
+      date: Date.now(), level: s.level, role: s.role, difficulty: s.difficulty, speed: s.speed || 1, reps: rs.length,
       score: avg((r) => r.total), scan: avg((r) => r.scanScore), decision: avg((r) => r.decision), memory: avg((r) => r.memory),
-      scanRate: rs.reduce((a, r) => a + r.scanRate, 0) / rs.length,
+      scanRate: rs.reduce((a, r) => a + (r.scanRate || 0), 0) / rs.length,
       completed: rs.filter((r) => ['completed', 'tight', 'goal'].includes(r.outcome)).length,
+      metrics, objective, daily: !!s.daily,
+      newBest: s.level != null && prevBest > 0 && avg((r) => r.total) > prevBest,
     };
+    const wasPassed = s.level != null && store.profile.passed[s.level];
     store.recordSession(rec);
+    rec.firstPass = !!objective?.passed && !wasPassed;
+    if (rec.firstPass || rec.newBest) this.audio.cheer(rec.firstPass ? 0.9 : 0.6);
     if (s.tutorial) { store.data.tutorialDone = true; store.save(); }
     const starsEarned = store.starsFor(rec.score);
-    const next = s.level != null && s.level < CAREER.length - 1 && store.unlocked(s.level + 1) ? s.level + 1 : null;
+    const next = s.tutorial ? 0 : s.level != null && objective?.passed && s.level < CAREER.length - 1 ? s.level + 1 : null;
     this.audio.whistle(true);
     this.mode = 'summary';
     this.rep = null;
     this.world.clearOverlays();
-    this.world.idle();
     this.toMenuView();
+    this.refreshBoards();
     this.panel.show(S.summary(this, rec, starsEarned, next));
     this.placePanel();
   }
@@ -674,10 +853,20 @@ class App {
       k.text(`${(rp.t - t0).toFixed(1)} S`, k.w - 60, 92, 44, { align: 'right', color: 'rgba(242,240,232,0.55)' });
       k.g.fillStyle = 'rgba(242,240,232,0.12)'; k.rr(x, y + 30, w, 16, 8); k.g.fill();
       const px = (t) => x + ((t - t0) / (t1 - t0 || 1)) * w;
-      k.g.fillStyle = '#f2f0e8'; k.rr(x, y + 30, px(rp.t) - x, 16, 8); k.g.fill();
+      // the critical window: from the pass to you leaving, until it arrives
+      const fin = rep.events.find((e) => e.type === 'final'), rec = rep.events.find((e) => e.type === 'receive');
+      if (fin && rec) {
+        k.g.fillStyle = 'rgba(255,122,26,0.22)';
+        k.g.fillRect(px(fin.t), y, px(rec.t) - px(fin.t), 76);
+      }
+      k.g.fillStyle = '#f2f0e8'; k.rr(x, y + 30, Math.max(0, px(rp.t) - x), 16, 8); k.g.fill();
+      // teammates' touches: eyes should be on the ball at these moments
+      k.g.fillStyle = 'rgba(242,240,232,0.85)';
+      for (const tc of rep.touches || []) k.g.fillRect(px(tc.t) - 1.5, y + 50, 3, 26);
       for (const sc of rep.scans) {
-        k.g.fillStyle = sc.shoulder ? '#4fd88a' : '#ffe08a';
-        k.g.fillRect(px(sc.t) - 3, y + 6, 6, 64);
+        k.g.fillStyle = sc.bad ? '#ff5a4f' : sc.shoulder ? '#4fd88a' : '#ffe08a';
+        const x0 = px(sc.t), x1 = Math.max(x0 + 6, px(sc.end ?? sc.t));
+        k.g.fillRect(x0, y + 4, x1 - x0, 22);
       }
       for (const e of rep.events) {
         if (!['final', 'receive', 'decide', 'lost'].includes(e.type)) continue;
@@ -685,12 +874,12 @@ class App {
         k.g.beginPath(); k.g.arc(px(e.t), y + 38, 14, 0, Math.PI * 2); k.g.fill();
       }
       k.hit('scrub', x, y, w, 80, (hx) => { rp.t = t0 + ((hx - x) / w) * (t1 - t0); rp.playing = false; this.bar.redraw(); });
-      const legend = [['SCAN', '#ffe08a'], ['SHOULDER CHECK', '#4fd88a'], ['BEST PASS', '#4fd88a'], ['YOUR PASS', '#f2f0e8']];
+      const legend = [['SCAN', '#ffe08a'], ['SHOULDER', '#4fd88a'], ['AT A TOUCH', '#ff5a4f'], ['BEST PASS', '#4fd88a'], ['YOUR PASS', '#f2f0e8']];
       let lx = x;
       legend.forEach(([l, c], i) => {
         k.g.fillStyle = c;
-        if (i < 2) k.g.fillRect(lx, 238, 6, 30); else k.g.fillRect(lx, 250, 30, 6);
-        lx += i < 2 ? 18 : 42;
+        if (i < 3) k.g.fillRect(lx, 238, 6, 30); else k.g.fillRect(lx, 250, 30, 6);
+        lx += i < 3 ? 18 : 42;
         lx += k.text(l, lx, 264, 30, { color: 'rgba(242,240,232,0.7)', weight: 600 }) + 34;
       });
       const bw = (w - 60) / 4;
@@ -774,9 +963,13 @@ class App {
       const end = (o) => (o.kind === 'shot' ? { x: 52.5, z: 0 } : o.target.pos);
       w.setLine(w.bestLine, best ? from : null, best ? end(best) : null);
       w.setLine(w.choiceLine, ch ? from : null, ch ? end(ch) : null);
+      // who it should have gone to, and who took it
+      if (best?.target) best.target.highlight(0x4fd88a, 0.9);
+      if (['intercepted', 'lost', 'blocked'].includes(rep.result.outcome)) rep.outcomeTarget?.highlight(0xff5a4f, 0.9);
     } else {
       w.setLine(w.bestLine, null, null);
       w.setLine(w.choiceLine, null, null);
+      for (const p of [...rep.home, ...rep.away]) p.highlight(0xffffff, 0);
     }
     this.replayRedrawT = (this.replayRedrawT || 0) - dt;
     if (rp.playing && this.replayRedrawT <= 0) { this.replayRedrawT = 0.1; this.bar.redraw(); }
@@ -816,14 +1009,23 @@ class App {
       this.camera.rotation.set(this.look.pitch, this.look.yaw, 0);
     }
     this.pollButtons();
+    if (this.pendingAfter) {
+      this.pendingAfter.t -= dt;
+      if (this.pendingAfter.t <= 0) { const f = this.pendingAfter.fn; this.pendingAfter = null; f(); }
+    }
     this.locomotion(dt);
     this.updateAttackMarkers(dt);
 
     const fm = this.fade.material;
-    fm.opacity += (this.fadeTo - fm.opacity) * Math.min(1, dt * 8);
+    fm.opacity += (this.fadeTo - fm.opacity) * Math.min(1, dt * (this.fadeTo > fm.opacity ? 16 : 8));
     this.fade.visible = fm.opacity > 0.01;
 
-    if (this.mode === 'menu' || this.mode === 'summary') this.world.idleStep(dt);
+    if ((this.mode === 'menu' || this.mode === 'summary') && !this.inLocker) this.world.idleStep(dt);
+    if (this.inLocker) {
+      const { doorGaze } = this.locker.update(dt, this.headPos(), this.world.headDir(_v1));
+      // the crowd outside gets louder as you turn to the tunnel
+      this.audio.setCrowd?.(0.06 + doorGaze * 0.2);
+    }
     if (this.mode === 'play' && this.rep) {
       if (this.holdT > 0) this.holdT -= dt;
       else this.rep.update(dt);
@@ -860,6 +1062,8 @@ class App {
       if (r.src !== 'mouse') {
         const ud = r.src.userData;
         ud.line.scale.z = hit ? hit.distance : this.mode === 'play' ? 30 : 5;
+        // no laser while the play builds up; it only appears when there's something to aim at
+        ud.line.visible = !!hit || this.mode !== 'play' || ['incoming', 'decide'].includes(this.rep?.state);
         ud.line.material.opacity = hit || this.mode !== 'play' ? 0.6 : 0.3;
         if (hit) { ud.dot.visible = true; ud.dot.position.copy(hit.point); }
       }
@@ -875,6 +1079,13 @@ class App {
       if (moved && now - (this.cursorDrawn || 0) > 60) { this.quizCursor = cursor; this.cursorDrawn = now; this.panel.redraw(); }
     }
     for (const p of this.pointer.panels) p.setHover(p === hoverPanel ? hoverId : null);
+    // the room's objects light up under the pointer when no screen is in the way
+    let lockerHover = null;
+    if (this.inLocker && !hoverId && ['menu', 'summary'].includes(this.mode)) {
+      for (const r of rays) { if (this.pointer.hitPanels(r.origin, r.dir)) continue; lockerHover = this.pickLocker(r); if (lockerHover) break; }
+    }
+    if (this.inLocker) this.locker.setHover(lockerHover);
+    if (lockerHover && !this.inXR) this.renderer.domElement.style.cursor = 'pointer';
   }
 }
 

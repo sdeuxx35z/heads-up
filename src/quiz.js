@@ -6,7 +6,7 @@ const TYPES = ['nearest', 'count', 'free'];
 
 // Questions asked in the dark, about the picture the viewer should have built.
 export function makeQuiz(snap) {
-  if (snap.cue) return { type: 'cue', snap, answered: false, score: 0, guess: null };
+  if (snap.cue) return { type: snap.cue.mode === 'spot' && snap.cue.spots ? 'cuepos' : 'cue', snap, answered: false, score: 0, guess: null };
   const types = TYPES.filter((t) => t !== 'free' || snap.mates.length >= 3);
   const type = types[(Math.random() * types.length) | 0];
   const q = { type, snap, answered: false, score: 0, guess: null };
@@ -41,10 +41,14 @@ export function quizScreen(app, q) {
   return (k) => {
     k.bg();
     const g = k.g;
-    const titles = { nearest: 'WHERE WAS THE NEAREST OPPONENT?', count: 'OPPONENTS WITHIN 10 METRES?', free: 'WHO HAD THE MOST SPACE?', cue: 'WHAT COLOUR FLASHED BEHIND YOU?' };
+    const titles = {
+      nearest: 'WHERE WAS THE NEAREST OPPONENT?', count: 'OPPONENTS WITHIN 10 METRES?', free: 'WHO HAD THE MOST SPACE?',
+      cue: 'WHAT COLOUR FLASHED BEHIND YOU?', cuepos: 'WHERE DID IT FLASH?', backpost: 'WHERE WAS THE BACK-POST RUNNER?',
+    };
     if (q.type === 'cue') {
-      const cols = q.snap.cue.colors, names = q.snap.cue.names;
-      const bw = 300, gap = 30, x0 = (k.w - (bw * 3 + gap * 2)) / 2;
+      // five colours: a blind guess is one in five
+      const cols = q.snap.cue.colors, names = q.snap.cue.names, n = cols.length;
+      const bw = 214, gap = 22, x0 = (k.w - (bw * n + gap * (n - 1))) / 2;
       cols.forEach((c, i) => {
         const x = x0 + i * (bw + gap), right = i === q.snap.cue.color;
         if (q.answered) {
@@ -55,12 +59,46 @@ export function quizScreen(app, q) {
         } else {
           g.fillStyle = c; k.rr(x, 250, bw, 260, 26); g.fill();
           if (k.hovered('cue' + i)) { g.strokeStyle = '#fff'; g.lineWidth = 6; k.rr(x + 3, 253, bw - 6, 254, 24); g.stroke(); }
-          k.text(names[i], x + bw / 2, 470, 40, { align: 'center', color: '#111' });
+          k.text(names[i], x + bw / 2, 470, 36, { align: 'center', color: '#111' });
           k.hit('cue' + i, x, 250, bw, 260, () => { q.guess = i; app.answerQuiz(i === q.snap.cue.color ? 100 : 0); });
         }
       });
     }
     k.text(titles[q.type], k.w / 2, 90, 56, { weight: 800, align: 'center' });
+
+    // Four lettered spots on the map; one is where the thing happened. type 'cuepos' reads
+    // snap.cue.spots / snap.cue.spot, type 'backpost' reads snap.box.spots / snap.box.spot.
+    if (q.type === 'cuepos' || q.type === 'backpost') {
+      const src = q.type === 'cuepos' ? q.snap.cue : q.snap.box;
+      const spots = src.spots, right = src.spot;
+      const size = 600, x0 = (k.w - size) / 2, y0 = 130;
+      const m = mapper(q.snap, x0, y0, size);
+      g.save();
+      k.rr(x0, y0, size, size, 28); g.clip();
+      g.fillStyle = 'rgba(30,70,30,0.78)'; g.fillRect(x0, y0, size, size);
+      g.strokeStyle = 'rgba(255,255,255,0.12)'; g.lineWidth = 2;
+      for (const r of [10, 20]) { g.beginPath(); g.arc(x0 + size / 2, y0 + size / 2, (r / MAP_M) * size, 0, Math.PI * 2); g.stroke(); }
+      const u = m.toPx(q.snap.user);
+      g.fillStyle = UI.accent;
+      g.beginPath(); g.moveTo(u.x, u.y - 22); g.lineTo(u.x - 15, u.y + 14); g.lineTo(u.x + 15, u.y + 14); g.closePath(); g.fill();
+      g.restore();
+      edge(g, x0, y0, size, size, 28);
+      spots.forEach((s, i) => {
+        const p = m.toPx(s);
+        const px = clamp(p.x, x0 + 36, x0 + size - 36), py = clamp(p.y, y0 + 36, y0 + size - 36);
+        const id = 's' + i, isRight = i === right, picked = q.guess === i;
+        let fill = GLASS.off, ink = '#111';
+        if (q.answered) {
+          fill = isRight ? UI.good : picked ? UI.bad : GLASS.chipOff;
+          ink = isRight || picked ? '#111' : GLASS.dim;
+        } else if (k.hovered(id)) fill = '#fff';
+        g.fillStyle = fill; g.beginPath(); g.arc(px, py, 32, 0, Math.PI * 2); g.fill();
+        edge(g, px - 32, py - 32, 64, 64, 32, 0.4, 0.1);
+        k.text('ABCD'[i], px, py + 2, 40, { align: 'center', base: 'middle', weight: 800, color: ink });
+        if (!q.answered) k.hit(id, px - 36, py - 36, 72, 72, () => { q.guess = i; app.answerQuiz(i === right ? 100 : 0); });
+      });
+      if (q.answered) k.text(`${q.score}`, x0 + size + 40, y0 + 90, 80, { weight: 800, color: q.score >= 60 ? UI.good : UI.bad });
+    }
 
     if (q.type === 'nearest') {
       const size = 600, x0 = (k.w - size) / 2, y0 = 130;

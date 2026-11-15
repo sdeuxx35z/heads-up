@@ -4,6 +4,14 @@ import { ROLES, AWAY_442, HOME_KIT, AWAY_KIT, GK_HOME, GK_AWAY } from './config.
 
 const _v = new THREE.Vector3();
 const _q = new THREE.Quaternion();
+const _to = new THREE.Vector3();
+const TAU = Math.PI * 2;
+const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+
+// The menu kick-about: two groups of six on rings knock the ball round and now and then hit a long one across to
+// the other group; the defenders jog short lanes; the keepers shuffle on their line.
+const RING_R = 6.2;
+const GROUPS = [{ team: 'home', cx: -17, cz: -3 }, { team: 'away', cx: 17, cz: 4 }];
 
 // Everything that lives on the pitch, plus where the viewer stands.
 export class World {
@@ -36,18 +44,49 @@ export class World {
     this.away.forEach((p) => p.setVisible(true));
     this.rondoSquare.visible = false;
     this.home = this.homeSets.get(F);
+    // the ball finds the man who kicks it and the man it arrives at from this list
+    this.actors = this.home.concat(this.away);
+    this.ball.players = this.actors;
   }
 
-  // A calm kick-about for the menus.
+  // A calm kick-about for the menus: two passing groups, jogging defenders, keepers on their lines.
   idle() {
-    this.home.forEach((p, i) => {
-      const [, x, z] = ROLES.CM.formation[i] || [0, 0, 0];
-      p.place(x * 0.9, z);
-      p.setVisible(true);
-    });
-    this.away.forEach((p, i) => { p.setVisible(true); p.place(AWAY_442[i][1] * 0.9, AWAY_442[i][2]); });
-    this.ball.set(0, 0);
+    this.useFormation(ROLES.CM.formation);
     this.idleT = 0;
+    this._groups = GROUPS.map((g) => {
+      const set = g.team === 'home' ? this.home : this.away;
+      const members = set.slice(5, 11);
+      const spots = members.map((_, i) => {
+        const a = (i / members.length) * TAU + 0.5;
+        return { x: g.cx + Math.cos(a) * RING_R, z: g.cz + Math.sin(a) * RING_R, ox: 0, oz: 0, moveT: 0 };
+      });
+      members.forEach((p, i) => p.place(spots[i].x, spots[i].z, Math.atan2(g.cx - spots[i].x, g.cz - spots[i].z)));
+      return { members, spots };
+    });
+    this._lanes = [];
+    this._keepers = [];
+    [this.home, this.away].forEach((set, si) => {
+      const sx = si ? 1 : -1;
+      for (let i = 1; i <= 4; i++) {
+        const alongZ = i % 2 === 1;
+        const bx = sx * (30 + (i % 2) * 5), bz = -21 + (i - 1) * 14, h = 4.5;
+        const lane = { p: set[i], goB: Math.random() < 0.5, wait: Math.random() * 1.2,
+          ax: bx - (alongZ ? 0 : h), az: bz - (alongZ ? h : 0), bx: bx + (alongZ ? 0 : h), bz: bz + (alongZ ? h : 0) };
+        set[i].place(lane.goB ? lane.bx : lane.ax, lane.goB ? lane.bz : lane.az);
+        this._lanes.push(lane);
+      }
+      const gk = set[0];
+      gk.place(sx * 47.5, 0);
+      this._keepers.push({ p: gk, x: sx * 47.5, ph: Math.random() * 6 });
+    });
+    // one ball, starting at a man's feet
+    const holder = this._groups[0].members[0];
+    this._pass = { state: 'hold', holder, aim: null, grp: 0, t: 0.8, yaw: 0, turnT: 0, count: 0, limit: 4 + ((Math.random() * 4) | 0) };
+    this.holdBall(holder);
+  }
+
+  holdBall(p) {
+    this.ball.set(p.pos.x + Math.sin(p.heading) * 0.45, p.pos.z + Math.cos(p.heading) * 0.45);
   }
 
   // 12 m grid the rondo is played in
@@ -60,16 +99,85 @@ export class World {
   idleStep(dt) {
     this.rondoSquare.visible = false;
     this.idleT += dt;
-    const t = this.idleT;
-    const bx = Math.sin(t * 0.07) * 18, bz = Math.sin(t * 0.11) * 14;
-    this.ball.set(bx, bz);
-    const all = [...this.home, ...this.away];
-    all.forEach((p, i) => {
-      const [, x, z] = (p.team === 'home' ? ROLES.CM.formation : AWAY_442)[i % 11];
-      p.maxSpeed = 3;
-      p.target.set(x + bx * 0.5 + Math.sin(t * 0.3 + i) * 1.5, 0, z * 0.85 + bz * 0.3);
-      p.step(dt, this.ball.pos);
-    });
+    const t = this.idleT, ball = this.ball, ps = this._pass;
+
+    // --- the ball: hold it a moment, square up to a teammate, strike, trap
+    if (ball.flight) {
+      if (ball.update(dt)) { ps.holder = ps.aim; ps.aim = null; ps.state = 'hold'; ps.t = 0.55 + Math.random() * 0.55; }
+    } else if (ps.state === 'fly') {
+      // the flight was cut short from outside; carry on from wherever the ball is
+      ps.holder = ps.aim || ps.holder; ps.aim = null; ps.state = 'hold'; ps.t = 0.5;
+    } else if (ps.state === 'hold') {
+      this.holdBall(ps.holder);
+      ps.t -= dt;
+      if (ps.t <= 0) this.choosePass(ps);
+    } else {
+      this.holdBall(ps.holder);
+      ps.turnT += dt;
+      if (Math.abs(wrap(ps.holder.heading - ps.yaw)) < 0.25 || ps.turnT > 1) this.strike(ps);
+    }
+
+    // --- the groups: everyone holds a spot on the ring; whoever just passed jogs off it and back
+    for (const g of this._groups) {
+      for (let i = 0; i < g.members.length; i++) {
+        const p = g.members[i], sp = g.spots[i];
+        if (sp.moveT > 0) sp.moveT -= dt;
+        const off = sp.moveT > 0.5 ? 1 : 0;
+        p.maxSpeed = 3.2;
+        p.target.set(sp.x + sp.ox * off, 0, sp.z + sp.oz * off);
+      }
+    }
+    for (const l of this._lanes) {
+      const p = l.p;
+      p.maxSpeed = 2.7;
+      if (l.wait > 0) { l.wait -= dt; p.target.copy(p.pos); continue; }
+      p.target.set(l.goB ? l.bx : l.ax, 0, l.goB ? l.bz : l.az);
+      if (Math.hypot(p.pos.x - p.target.x, p.pos.z - p.target.z) < 0.7) { l.goB = !l.goB; l.wait = 0.6 + Math.random() * 0.9; }
+    }
+    for (const k of this._keepers) {
+      k.p.maxSpeed = 1.6;
+      k.p.target.set(k.x, 0, Math.sin(t * 0.42 + k.ph) * 2.6);
+    }
+    for (let i = 0; i < this.actors.length; i++) this.actors[i].step(dt, ball.pos);
+  }
+
+  // who gets it next: mostly someone on the same ring who is not busy, now and then a long one to the other group
+  choosePass(ps) {
+    const h = ps.holder;
+    const long = ps.count >= ps.limit;
+    const toGrp = long ? 1 - ps.grp : ps.grp;
+    const g = this._groups[toGrp];
+    const idle = [];
+    for (let i = 0; i < g.members.length; i++) if (g.members[i] !== h && g.spots[i].moveT <= 0) idle.push(g.members[i]);
+    if (!idle.length) return;
+    ps.aim = idle[(Math.random() * idle.length) | 0];
+    ps.toGrp = toGrp;
+    ps.yaw = Math.atan2(ps.aim.pos.x - h.pos.x, ps.aim.pos.z - h.pos.z);
+    ps.state = 'turn';
+    ps.turnT = 0;
+    h.turnTo(ps.yaw, 1);
+  }
+
+  strike(ps) {
+    const h = ps.holder, r = ps.aim, ball = this.ball;
+    // into his feet: half a metre this side of him, where he will stand when he has turned to face us
+    _to.set(h.pos.x - r.pos.x, 0, h.pos.z - r.pos.z).setLength(0.5);
+    const tx = r.pos.x + _to.x, tz = r.pos.z + _to.z;
+    const dist = Math.hypot(tx - ball.pos.x, tz - ball.pos.z);
+    const long = ps.toGrp !== ps.grp;
+    _to.set(tx, 0.11, tz);
+    ball.kick(ball.pos, _to, long ? 17 : 10.5 + Math.random() * 3, long ? dist * 0.075 : 0);
+    if (long) { ps.count = 0; ps.limit = 4 + ((Math.random() * 4) | 0); } else ps.count++;
+    // pass and move: the passer slips sideways off the ring and back
+    const g = this._groups[ps.grp];
+    const sp = g.spots[g.members.indexOf(h)];
+    if (sp) {
+      const side = Math.random() < 0.5 ? -1 : 1;
+      const ux = r.pos.x - h.pos.x, uz = r.pos.z - h.pos.z, ul = Math.hypot(ux, uz) || 1;
+      sp.ox = (-uz / ul) * 3 * side; sp.oz = (ux / ul) * 3 * side; sp.moveT = 2.2;
+    }
+    ps.grp = ps.toGrp;
+    ps.state = 'fly';
   }
 
   userPos(out = new THREE.Vector3()) {
