@@ -54,7 +54,7 @@ export const STAGES = ['SEE', 'JUDGE', 'REMEMBER', 'FINISH'];
 const L = (name, o) => ({ name, reps: 5, difficulty: 'MEDIUM', speed: 1, quizChance: 0, drill: 'match', role: 'CM', ...o });
 const LESSONS = [
   L('LOOK AWAY', { difficulty: 'EASY', speed: 0.8, objective: ['rate', 0.5], teaches: 'scan' }),
-  L('SCAN RATE', { drill: 'rondo', difficulty: 'EASY', objective: ['rate', 0.8], teaches: 'rate' }),
+  L('SCAN RATE', { difficulty: 'EASY', objective: ['rate', 0.8], teaches: 'rate' }),
   L('TIMING', { difficulty: 'EASY', minFlight: 1.1, objective: ['timing', 70], teaches: 'timing' }),
   // longer passes so there's time to look away while the ball travels
   L('CRITICAL SCAN', { role: 'CM', difficulty: 'EASY', minFlight: 1.4, objective: ['critical', 0.5], teaches: 'critical' }),
@@ -62,7 +62,8 @@ const LESSONS = [
   L('EXAM: SEE', { reps: 8, roles: ['CM', 'CB', 'FB', 'CDM'], drills: ['match', 'press', 'rondo', 'match'], objective: ['score', 60] }),
 
   L('SAFE OR FORWARD', { objective: ['decision', 70], teaches: 'decision' }),
-  L('BODY SHAPE', { drill: 'turn', role: 'CDM', objective: ['body', 0.7], teaches: 'body' }),
+  // no hip tracking in a headset, so the turn itself is graded: shoulder check, then turn or bounce it back
+  L('RECEIVE AND TURN', { drill: 'turn', role: 'CDM', objective: ['scenario', 60], teaches: 'body' }),
   L('SWITCH PLAY', { drill: 'switch', role: 'FB', objective: ['decision', 70] }),
   L('ONE TOUCH', { drill: 'sandwich', objective: ['complete', 0.7] }),
   L('THIRD MAN', { drill: 'thirdman', role: 'CAM', objective: ['decision', 65] }),
@@ -75,9 +76,9 @@ const LESSONS = [
   L('CHANGE YOUR MIND', { drill: 'inhibit', objective: ['decision', 65] }),
   L('EXAM: REMEMBER', { reps: 8, difficulty: 'HARD', quizChance: 0.5, roles: ['CM', 'CB', 'W', 'CDM'], drills: ['match', 'colour', 'awareness', 'signal', 'inhibit'], objective: ['score', 62] }),
 
-  L('WINGER', { role: 'W', difficulty: 'HARD', objective: ['score', 62] }),
-  L('STRIKER', { role: 'ST', difficulty: 'HARD', objective: ['score', 60] }),
-  L('GOALKEEPER', { role: 'GK', difficulty: 'HARD', objective: ['score', 62] }),
+  L('WINGER', { role: 'W', difficulty: 'HARD', drills: ['match', 'through', 'switch'], roles: ['W'], objective: ['score', 62] }),
+  L('STRIKER', { role: 'ST', difficulty: 'HARD', drills: ['match', 'through', 'thirdman'], roles: ['ST'], objective: ['score', 60] }),
+  L('GOALKEEPER', { role: 'GK', difficulty: 'HARD', drills: ['gkbuild', 'match'], roles: ['GK'], objective: ['score', 55] }),
   L('TWO PRESSERS', { difficulty: 'ELITE', objective: ['score', 58] }),
   L('FULL SPEED', { difficulty: 'ELITE', speed: 1.1, roles: ['CM', 'W', 'CB', 'ST', 'CAM'], drills: ['match', 'press', 'switch', 'thirdman', 'match'], objective: ['score', 62] }),
   L('FINAL', { reps: 12, difficulty: 'ELITE', speed: 1.15, quizChance: 0.3, roles: ['CM', 'CB', 'FB', 'CDM', 'CAM', 'W', 'ST', 'GK'], drills: ['match', 'press', 'turn', 'switch', 'thirdman', 'sandwich', 'colour', 'inhibit'], objective: ['score', 68] }),
@@ -86,7 +87,7 @@ export const CAREER = LESSONS.map((l, i) => ({ ...l, index: i, stage: Math.floor
 export const OBJECTIVE_LABEL = {
   rate: (v) => `SCANS ${Math.round(v * 100)}% OF PAR`, timing: (v) => `TIMING ${v}%`, critical: (v) => `CRITICAL SCAN ${Math.round(v * 100)}% OF REPS`,
   info: (v) => `INFO ${v}`, body: (v) => `OPEN BODY ${Math.round(v * 100)}% OF REPS`, decision: (v) => `DECISION ${v}`,
-  memory: (v) => `MEMORY ${v}`, complete: (v) => `KEEP THE BALL ${Math.round(v * 100)}%`, score: (v) => `SCORE ${v}`,
+  memory: (v) => `MEMORY ${v}`, scenario: (v) => `READ THE SITUATION ${v}`, complete: (v) => `KEEP THE BALL ${Math.round(v * 100)}%`, score: (v) => `SCORE ${v}`,
 };
 export const STAR_LINES = [55, 70, 85];
 

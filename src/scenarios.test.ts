@@ -88,9 +88,20 @@ const incomingWith = (f: (rep: any) => any, from = 0.5) => (rep: any, w: any) =>
 };
 
 const KEYS = Object.keys(SCENARIOS);
+// where a runner will be when a ball hit from the viewer's feet gets there
+const leadPoint = (rep: any, w: any) => {
+  const from = w.ball.pos, r = rep.runner;
+  let L = { x: r.pos.x, z: r.pos.z };
+  for (let i = 0; i < 5; i++) {
+    const T = Math.hypot(L.x - from.x, L.z - from.z) / 17;
+    const k = Math.min(Math.hypot(rep.E.x - r.pos.x, rep.E.z - r.pos.z), rep.runV * T);
+    L = { x: r.pos.x + rep.runDir.x * k, z: r.pos.z + rep.runDir.z * k };
+  }
+  return L;
+};
 
-test('registry: eight scenarios with names and roles', () => {
-  expect(KEYS).toEqual(['press', 'switch', 'thirdman', 'signal', 'colour', 'turn', 'inhibit', 'sandwich']);
+test('registry: ten scenarios with names and roles', () => {
+  expect(KEYS).toEqual(['press', 'switch', 'thirdman', 'signal', 'colour', 'turn', 'inhibit', 'sandwich', 'through', 'gkbuild']);
   for (const k of KEYS) {
     expect(typeof (SCENARIO_NAMES as any)[k]).toBe('string');
     expect((SCENARIO_NAMES as any)[k]).toBe((SCENARIO_NAMES as any)[k].toUpperCase());
@@ -605,4 +616,82 @@ test('answers are never decided by the scenario alone: lane margins still rule',
   play(rep, w, decideWith((r) => r.wrongs()[0]));
   expect(rep.result.decision).toBeLessThan(100);
   expect(['completed', 'tight', 'intercepted']).toContain(rep.result.outcome);
+});
+
+test('through: the line steps up while a forward runs in behind it; the through ball goes into his run', () => {
+  let sumLed = 0, sumFeet = 0;
+  const N = 14;
+  for (let i = 0; i < N; i++) {
+    const role = i % 2 ? 'W' : 'ST';
+    const A = make('through', role);
+    const x0 = A.rep.line.map((o: any) => o.pos.x);
+    let xs: number[] = [];
+    play(A.rep, A.w, (rep, w) => {
+      if (rep.state === 'incoming' && rep.runStarted) w.yaw = heading(w.user, rep.runner.pos);
+      if (rep.state === 'incoming' && !xs.length && rep.t - rep.strikeAt > 1.2) xs = rep.line.map((o: any) => o.pos.x);
+      if (rep.state === 'decide') aimAt(w, rep, leadPoint(rep, w), true);
+    });
+    const led = A.rep.result;
+    expect(xs.length).toBe(3);
+    xs.forEach((x, k) => expect(x0[k] - x).toBeGreaterThan(2.2)); // stepped up
+    expect(led.runnerSeen).toBe(true);
+    expect(led.quick).toBe(true);
+    expect(led.leadErr).toBeLessThan(1.5);
+    expect(led.correct).toBe(true);
+    expect(led.decision).toBe(100);
+    expect(['completed', 'tight']).toContain(led.outcome);
+    expect(led.fact).toMatch(/^THROUGH BALL \d\.\d M$/);
+    // the run is in behind the line: the runner ends up well past it
+    expect(A.rep.runner.pos.x).toBeGreaterThan(x0[0] + 5);
+
+    const B = make('through', role);
+    // at his feet: the ball hits the grass where he stands
+    play(B.rep, B.w, (rep, w) => { if (rep.state === 'decide') aimAt(w, rep, { x: rep.runner.pos.x, z: rep.runner.pos.z }, true); });
+    expect(B.rep.result.leadErr).toBeGreaterThan(1.5);
+    expect(B.rep.result.correct).toBe(false);
+    expect(B.rep.result.scenarioScore).toBeLessThan(led.scenarioScore);
+
+    const C = make('through', role);
+    play(C.rep, C.w, decideWith((r) => r.wrongs()[0]));
+    expect(C.rep.result.fact).toBe('RUNNER MISSED');
+    expect(C.rep.result.decision).toBeLessThan(100);
+    sumLed += led.scenarioScore; sumFeet += B.rep.result.scenarioScore;
+  }
+  expect(sumLed / N).toBeGreaterThan(sumFeet / N + 15);
+});
+
+test('gkbuild: play to the open centre back, or go long when both are shut', () => {
+  const seen = { both: 0, one: 0 };
+  for (let n = 0; n < 120 && (n < 12 || seen.both < 4 || seen.one < 4); n++) {
+    const A = make('gkbuild', 'GK');
+    expect(A.rep.userBody.slot).toBe('GK');
+    expect(A.rep.roleKey).toBe('GK');
+    let want: any = null;
+    play(A.rep, A.w, decideWith((r) => (want = r.answer().target)));
+    const good = A.rep.result;
+    expect(good.correct).toBe(true);
+    expect(good.decision).toBe(100);
+    expect(good.bothPressed).toBe(A.rep.both);
+    expect(want).toBe(A.rep.both ? A.rep.longMan : A.rep.other);
+    expect(good.fact).toBe(A.rep.both ? 'BOTH CENTRE BACKS SHUT' : 'ONE CENTRE BACK SHUT');
+    seen[A.rep.both ? 'both' : 'one']++;
+    if (!A.rep.both) expect(['completed', 'tight']).toContain(good.outcome);
+
+    const B = make('gkbuild', 'GK');
+    play(B.rep, B.w, decideWith((r) => r.wrongs()[0]));
+    expect(B.rep.result.correct).toBe(false);
+    expect(B.rep.result.decision).toBeLessThan(100);
+    expect(B.rep.result.scenarioScore).toBeLessThan(good.scenarioScore + 1);
+  }
+  expect(seen.both).toBeGreaterThan(3);
+  expect(seen.one).toBeGreaterThan(3);
+});
+
+test('gkbuild: the keeper stands on his goal line and the strikers jump from the front', () => {
+  for (let n = 0; n < 20; n++) {
+    const { w, rep } = make('gkbuild');
+    expect(w.user.x).toBeLessThan(-45);
+    expect(rep.longMan.pos.x).toBeGreaterThan(-15);
+    for (const o of [rep.s1, rep.s2]) expect(o.pos.x).toBeGreaterThan(w.user.x + 5);
+  }
 });

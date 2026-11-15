@@ -91,6 +91,7 @@ export class Scenario extends Rep {
     this.pinned = new Set(); // opposition the lane/area clearing must not nudge
     this.stalk = new Map(); // offsets from the viewer that stalkers keep
     this.rules = [];
+    this.plans = new Map(); // presser -> his plan for this rep
     this.watch = {};
     this.saw = {};
     this.sawAt = {};
@@ -330,15 +331,31 @@ export class Scenario extends Rep {
     o.maxSpeed = speed;
   }
 
-  // Once the last pass is struck (after `delay` seconds) o closes the viewer down to `standoff` metres.
-  closeIn(o, user, v, delay, standoff) {
+  // The press. From the strike o follows a straight plan that brings him to dA metres from the viewer as the
+  // ball arrives, nudging his speed for whatever his legs actually did (reaction time, acceleration, the
+  // per-player top speed), and after the touch he keeps closing to `standoff` metres.
+  closeIn(o, user, dA, standoff) {
     if (!this.finalStruck || (this.state !== 'incoming' && this.state !== 'decide')) return false;
-    if (this.state === 'incoming' && this.t - this.strikeAt < delay) return false;
-    const dx = o.pos.x - user.x, dz = o.pos.z - user.z, l = Math.hypot(dx, dz) || 1;
-    o.target.set(user.x + (dx / l) * standoff, 0, user.z + (dz / l) * standoff);
-    o.maxSpeed = v;
+    let p = this.plans.get(o);
+    if (!p) {
+      const d0 = Math.hypot(o.pos.x - user.x, o.pos.z - user.z);
+      const T = Math.max(0.6, this.finalFlight || this.flightT / this.speed);
+      p = { t0: this.t, d0, T, v: Math.max(0, d0 - dA) / T };
+      this.plans.set(o, p);
+      o.anticipate?.(T + 1.5); // no reaction delay: he is already moving
+    }
+    const dx = o.pos.x - user.x, dz = o.pos.z - user.z, d = Math.hypot(dx, dz) || 1;
+    const sp = this.diff.presserSpeed * this.speed, vcap = sp * 1.15;
+    const v = this.state === 'incoming'
+      ? clamp(p.v + 2.2 * (d - (p.d0 - p.v * (this.t - p.t0))), 0, vcap)
+      : clamp(Math.max(p.v, sp * 0.6), 0, vcap);
+    o.target.set(user.x + (dx / d) * standoff, 0, user.z + (dz / d) * standoff);
+    o.maxSpeed = Math.max(0.6, v / (o.speedMul || 1));
     return true;
   }
+
+  // how far a presser can really close in the flight (metres), for planning where he starts
+  reach() { return Math.min(0.62 * this.diff.presserSpeed * this.speed * 1.15 * (this.flightT / this.speed), 7); }
 
   // Everyone holds their spot with a little sway; script() then moves the scripted ones.
   moveActors(dt, user) {
@@ -416,7 +433,7 @@ export class Scenario extends Rep {
   finalBall(from, user) {
     const ball = this.world.ball, own = Object.prototype.hasOwnProperty.call(ball, 'kick'), orig = ball.kick;
     const T = this.flightT / this.gameSpeed;
-    ball.kick = (a, b, speed, loft) => orig.call(ball, a, b, Math.max(6, Math.hypot(b.x - a.x, b.z - a.z) / T), loft);
+    ball.kick = (a, b, speed, loft) => orig.call(ball, a, b, Math.max(1.5, Math.hypot(b.x - a.x, b.z - a.z) / T), loft);
     try { super.finalBall(from, user); } finally { if (own) ball.kick = orig; else delete ball.kick; }
     this.strikeAt = this.t;
     this.onFinal?.(from, user);
@@ -528,9 +545,10 @@ export class PressScenario extends Scenario {
     const fwd = this.pickMate(f2.z > uz ? ['RW', 'ST', 'CAM'] : ['LW', 'ST', 'CAM']);
     this.put(fwd, f2.x, f2.z);
 
-    // the presser starts 7-9 m off in the blind spot and closes so that he is near or far at arrival
-    const T = this.flightT / this.gameSpeed, v = d.presserSpeed * this.gameSpeed;
-    const D0 = rand(7.5, 9), dA = Math.random() < 0.5 ? rand(1.2, 2.8) : rand(4.4, 6.0);
+    // the presser starts in the blind spot and closes so that he is near or far at arrival
+    const close = Math.random() < 0.5, dA = close ? rand(1.2, 2.8) : rand(4.4, 6.0);
+    const D0 = dA + this.reach() * (close ? rand(0.55, 1.0) : rand(0.15, 0.4));
+    this.dA = dA;
     const pp = polar(U, h, -rsn * 150, D0);
     const pr = this.pickOpp(['ST1', 'ST2', 'LCM', 'RCM']);
     this.put(pr, pp.x, pp.z);
@@ -548,13 +566,11 @@ export class PressScenario extends Scenario {
 
     this.freeMan = freeMan; this.fwdMan = fwd; this.passer = cb; this.presser = pr;
     this.free = freeMan; this.pressers = [pr];
-    this.pv = v;
-    this.presserDelay = clamp(T - (D0 - dA) / v, 0, T - 0.1);
     this.watch = { presser: { p: pr }, free: { p: freeMan } };
   }
 
   script(dt, user) {
-    if (!this.closeIn(this.presser, user, this.pv, this.presserDelay, 1.0)) this.stalkUser(this.presser, user, 4);
+    if (!this.closeIn(this.presser, user, this.dA, 1.0)) this.stalkUser(this.presser, user, 4);
   }
 
   atArrival() { this.presserDist = dist2(this.presser.pos, this.world.userPos(this._u)); }
@@ -646,14 +662,11 @@ export class SwitchScenario extends Scenario {
 
     this.winger = winger; this.recycler = rc; this.presser = pr;
     this.free = winger; this.pressers = [pr];
-    this.pv = d.presserSpeed * this.gameSpeed * 0.8;
-    const T = this.flightT / this.gameSpeed;
-    this.presserDelay = clamp(T - 4 / this.pv, 0, T - 0.1);
     this.watch = { far: { p: winger }, press: { p: pr } };
   }
 
   script(dt, user) {
-    if (!this.closeIn(this.presser, user, this.pv, this.presserDelay, 1.5)) this.stalkUser(this.presser, user, 4);
+    if (!this.closeIn(this.presser, user, 3.4, 1.5)) this.stalkUser(this.presser, user, 4);
   }
 
   // lofted lane margin of the switch from where the ball is (or will be)
@@ -750,7 +763,6 @@ export class ThirdManScenario extends Scenario {
     this.runV = 6.5 * this.speed;
     this.runStarted = false;
     this.free = runner; this.pressers = [mk];
-    this.pv = d.presserSpeed * this.gameSpeed * 0.85;
     this.watch = { runner: { p: runner, when: () => this.runStarted } };
   }
 
@@ -764,7 +776,7 @@ export class ThirdManScenario extends Scenario {
       r.target.set(this.E.x, 0, this.E.z);
       r.maxSpeed = this.runV;
     }
-    if (!this.closeIn(this.marker, user, this.pv, 0.5, 1.8)) this.stalkUser(this.marker, user, 4);
+    if (!this.closeIn(this.marker, user, 1.8, 1.8)) this.stalkUser(this.marker, user, 4);
   }
 
   // where the runner is tau seconds from now
@@ -778,6 +790,7 @@ export class ThirdManScenario extends Scenario {
   // Aiming ahead of the runner counts: the ray's point on the grass, if it is near his path, becomes the lead.
   aim(origin, dir) {
     super.aim(origin, dir);
+    if (this._leadLine) { this._leadLine = false; this.world.setLine?.(this.world.choiceLine, null, null); }
     if (!this.runStarted || (this.state !== 'incoming' && this.state !== 'decide')) return;
     if (dir.y > -0.02) return;
     const k = (0.5 - origin.y) / dir.y;
@@ -787,14 +800,15 @@ export class ThirdManScenario extends Scenario {
     const dx = bx - ax, dz = bz - az, len2 = dx * dx + dz * dz || 1;
     const t = clamp(((px - ax) * dx + (pz - az) * dz) / len2, 0, 1);
     const qx = ax + dx * t, qz = az + dz * t;
-    if (Math.hypot(px - qx, pz - qz) > 2.8) return;
+    if (Math.hypot(px - qx, pz - qz) > 2.8 || t * Math.sqrt(len2) < 0.8) return;
     // a mate standing in front of that point on the ray still wins
     if (this.aimed && this.aimed.target !== r) {
       const m = this.aimed.target.pos;
       if (Math.hypot(m.x - origin.x, m.z - origin.z) < Math.hypot(px - origin.x, pz - origin.z) - 1) return;
     }
     this.aimed = { kind: 'pass', target: r, lead: { x: qx, z: qz } };
-    this.world.setLine?.(this.world.choiceLine, this.world.userPos(this._u), { x: qx, z: qz });
+    this.world.setLine?.(this.world.choiceLine, this.world.userPos(this._u), { x: qx, z: qz }); // shows where the ball will go
+    this._leadLine = true;
   }
 
   execute(choice, oneTouch) {
@@ -896,7 +910,7 @@ export class SignalScenario extends Scenario {
     this.marks.push([cm, covered, new THREE.Vector3(1.3, 0, -1.3)]);
 
     const pr = this.pickOpp(['ST1', 'ST2', 'LM', 'RM']);
-    const pp = polar(U, h, 180 + rand(-20, 20), rand(8, 10));
+    const pp = polar(U, h, 180 + rand(-20, 20), 3.5 + this.reach() * rand(0.5, 0.8));
     this.put(pr, pp.x, pp.z);
     this.pinned.add(pr);
     this.stalk.set(pr, new THREE.Vector3(pp.x - ux, 0, pp.z - uz));
@@ -909,9 +923,6 @@ export class SignalScenario extends Scenario {
 
     this.waver = waver; this.quiet = quiet; this.covered = covered; this.passer = cb; this.presser = pr;
     this.free = quiet; this.pressers = [pr];
-    this.pv = d.presserSpeed * this.gameSpeed * 0.85;
-    const T = this.flightT / this.gameSpeed;
-    this.presserDelay = clamp(T - 4.5 / this.pv, 0, T - 0.1);
     this.watch = { quiet: { p: quiet }, press: { p: pr } };
   }
 
@@ -922,7 +933,7 @@ export class SignalScenario extends Scenario {
       o.target.set(p.pos.x + off.x, 0, p.pos.z + off.z);
       o.maxSpeed = 5;
     }
-    if (!this.closeIn(this.presser, user, this.pv, this.presserDelay, 2.2)) this.stalkUser(this.presser, user, 4);
+    if (!this.closeIn(this.presser, user, 3.5, 2.2)) this.stalkUser(this.presser, user, 4);
   }
 
   // the wave: the right arm goes up and shakes (after the players' own animation has run)
@@ -982,7 +993,7 @@ export class ColourScenario extends Scenario {
       return p;
     });
     const pr = this.pickOpp(['ST1', 'ST2', 'LM', 'RM']);
-    const pp = polar(U, h, 180 + rand(-8, 8), rand(9, 11));
+    const pp = polar(U, h, 180 + rand(-8, 8), 4 + this.reach() * rand(0.5, 0.8));
     this.put(pr, pp.x, pp.z);
     this.pinned.add(pr);
     this.stalk.set(pr, new THREE.Vector3(pp.x - ux, 0, pp.z - uz));
@@ -1001,9 +1012,6 @@ export class ColourScenario extends Scenario {
     this.callAfter = 0.3 * this.flightT / this.gameSpeed;
     this.passer = cb; this.presser = pr; this.coloured = mates;
     this.pressers = [pr];
-    this.pv = d.presserSpeed * this.gameSpeed * 0.8;
-    const T = this.flightT / this.gameSpeed;
-    this.presserDelay = clamp(T - 5 / this.pv, 0, T - 0.1);
     this.watch = { a: { p: mates[0] }, b: { p: mates[1] }, c: { p: mates[2] } };
   }
 
@@ -1014,7 +1022,7 @@ export class ColourScenario extends Scenario {
   }
 
   script(dt, user) {
-    if (!this.closeIn(this.presser, user, this.pv, this.presserDelay, 2.6)) this.stalkUser(this.presser, user, 4);
+    if (!this.closeIn(this.presser, user, 4, 2.6)) this.stalkUser(this.presser, user, 4);
   }
 
   pre(s) {
@@ -1028,7 +1036,7 @@ export class ColourScenario extends Scenario {
 
   post() {
     const h = this.world.callHalo;
-    if (h && h.visible) h.position.copy(this.world.ball.pos);
+    if (h && h.visible) h.position.set(this.world.ball.pos.x, this.world.ball.pos.y + 0.3, this.world.ball.pos.z);
     if (this.state === 'buildup' || this.state === 'incoming') this.paintRings();
   }
 
@@ -1048,7 +1056,7 @@ export class ColourScenario extends Scenario {
         this.world.callHalo = h;
       }
       h.material.color.setHex(c.hex);
-      h.position.copy(this.world.ball.pos);
+      h.position.set(this.world.ball.pos.x, this.world.ball.pos.y + 0.3, this.world.ball.pos.z);
       h.visible = true;
     }
     this.fx.flash?.(c.hex, 0.4);
@@ -1108,7 +1116,8 @@ export class TurnScenario extends Scenario {
     const cb2 = this.pickMate(cbz >= 0 ? ['LCB', 'RCB'] : ['RCB', 'LCB']);
     this.put(cb2, cbx + rand(-2, 2), cbz >= 0 ? cbz - rand(14, 18) : cbz + rand(14, 18));
 
-    const D0 = 4.4, v = d.presserSpeed * this.gameSpeed * 0.7;
+    const D0 = 4.4;
+    this.dA = rand(2.2, 3.0);
     const pp = polar(U, h, rsn * 165, D0);
     const pr = this.pickOpp(['ST1', 'ST2', 'LCM', 'RCM']);
     this.put(pr, pp.x, pp.z);
@@ -1127,15 +1136,12 @@ export class TurnScenario extends Scenario {
 
     this.passer = cb; this.otherCB = cb2; this.freeMid = mid; this.presser = pr;
     this.free = mid; this.pressers = [pr];
-    this.pv = v;
-    const T = this.flightT / this.gameSpeed;
-    this.presserDelay = clamp(T - (D0 - rand(2.2, 3.0)) / v, 0, T - 0.1);
     this.shoulderT = -99;
     this.watch = { mid: { p: mid }, presser: { p: pr } };
   }
 
   script(dt, user) {
-    if (!this.closeIn(this.presser, user, this.pv, this.presserDelay, 1.1)) this.stalkUser(this.presser, user, 3.2);
+    if (!this.closeIn(this.presser, user, this.dA, 1.1)) this.stalkUser(this.presser, user, 3.2);
   }
 
   // a shoulder scan: head well past 100 degrees from the ball, looking at the man behind
@@ -1212,7 +1218,7 @@ export class InhibitScenario extends Scenario {
     this.put(ob, obp.x, obp.z);
     this.pinned.add(ob);
     const pr = this.pickOpp(['ST1', 'ST2']);
-    const pp = polar(U, h, 180 + rand(-15, 15), 9);
+    const pp = polar(U, h, 180 + rand(-15, 15), 4.5 + this.reach() * rand(0.5, 0.8));
     this.put(pr, pp.x, pp.z);
     this.pinned.add(pr);
     this.stalk.set(pr, new THREE.Vector3(pp.x - ux, 0, pp.z - uz));
@@ -1229,9 +1235,6 @@ export class InhibitScenario extends Scenario {
     this.freeSet = new Set([A, B]);
     this.passer = cb; this.presser = pr;
     this.free = B; this.pressers = [pr];
-    this.pv = d.presserSpeed * this.gameSpeed * 0.7;
-    const T = this.flightT / this.gameSpeed;
-    this.presserDelay = clamp(T - 5 / this.pv, 0, T - 0.1);
     this.lock = null; this.lockT = 0; this.cueAt = null;
     this.cueFired = false; this.closed = null; this.cueRaw = 0;
     this.early = false; this.repeated = false; this.switchDelay = null;
@@ -1239,7 +1242,7 @@ export class InhibitScenario extends Scenario {
   }
 
   script(dt, user) {
-    if (!this.closeIn(this.presser, user, this.pv, this.presserDelay, 2.6)) this.stalkUser(this.presser, user, 4);
+    if (!this.closeIn(this.presser, user, 4, 2.6)) this.stalkUser(this.presser, user, 4);
     if (this.cueFired) {
       const o = this.stepper.get(this.closed), lane = this.laneMid;
       if (!(this.state === 'outcome' && this.outcomeTarget === o)) {
@@ -1344,7 +1347,8 @@ export class SandwichScenario extends Scenario {
     const gp = polar(U, h, 180 + rand(-8, 8), rand(15, 18));
     const gap = this.pickMate(['ST', 'CAM', 'RW', 'LW']);
     this.put(gap, gp.x, gp.z);
-    const p1 = polar(U, h, 105, 8), p2 = polar(U, h, -105, 8);
+    const D0 = 2.3 + this.reach() * rand(0.7, 0.95);
+    const p1 = polar(U, h, 105, D0), p2 = polar(U, h, -105, D0 + rand(-0.4, 0.4));
     const a = this.pickOpp(['LCM', 'RCM', 'ST1', 'ST2']), b = this.pickOpp(['RCM', 'LCM', 'ST2', 'ST1']);
     this.put(a, p1.x, p1.z); this.put(b, p2.x, p2.z);
     this.pinned.add(a); this.pinned.add(b);
@@ -1360,16 +1364,13 @@ export class SandwichScenario extends Scenario {
 
     this.passer = cb; this.gapMan = gap; this.pA = a; this.pB = b;
     this.free = gap; this.pressers = [a, b];
-    this.pv = d.presserSpeed * this.gameSpeed * 0.85;
-    const T = this.flightT / this.gameSpeed;
-    this.delayA = clamp(T - 6 / this.pv, 0, T - 0.1);
-    this.delayB = clamp(T - 6 / (this.pv * 0.95), 0, T - 0.1);
+    this.dA = rand(2.0, 2.6); this.dB = rand(2.0, 2.6);
     this.watch = { a: { p: a }, b: { p: b } };
   }
 
   script(dt, user) {
-    if (!this.closeIn(this.pA, user, this.pv, this.delayA, 1.1)) this.stalkUser(this.pA, user, 4);
-    if (!this.closeIn(this.pB, user, this.pv * 0.95, this.delayB, 1.1)) this.stalkUser(this.pB, user, 4);
+    if (!this.closeIn(this.pA, user, this.dA, 1.1)) this.stalkUser(this.pA, user, 4);
+    if (!this.closeIn(this.pB, user, this.dB, 1.1)) this.stalkUser(this.pB, user, 4);
   }
 
   answer() { return { target: this.passer, one: true }; }
@@ -1396,6 +1397,213 @@ export class SandwichScenario extends Scenario {
   }
 }
 
+// ---------------------------------------------------------------------------------------------
+// D11 Line steps up. The back line steps up as the ball comes to you; a forward starts into the
+// space behind it. A through ball into his run, within a second and within 1.5 m of the line he runs.
+// ---------------------------------------------------------------------------------------------
+export class ThroughScenario extends ThirdManScenario {
+  static key = 'through';
+  static roles = ['W', 'ST'];
+  static flight = 1.3;
+  static quizOK = false;
+
+  build() {
+    const d = this.diff, wing = this.roleKey === 'W';
+    const slot = this.userBody.slot || '';
+    const side = wing ? (/^L/.test(slot) ? -1 : 1) : sign();
+    const ux = (wing ? 9 : 8) + rand(-2, 2), uz = wing ? side * rand(14, 19) : rand(-4, 4); // the striker has dropped in to receive
+    const cx = ux - rand(18, 21), cz = clamp(uz * 0.5 + rand(-6, 6), -13, 13);
+    this.userAt(ux, uz, cx, cz);
+    const U = this.U, h = heading(U, { x: cx, z: cz }), rsn = sign();
+    const carrier = this.pickMate(['LCM', 'RCM', 'CDM', 'LDM', 'RDM', 'LCB', 'RCB']);
+    this.put(carrier, cx, cz);
+
+    // the run: from level with the back line, in behind, roughly along the viewer's line
+    const end = { x: Math.min(ux + 24, 33), z: clamp(uz * 0.6 + rand(-5, 5), -26, 26) };
+    const xl = ux + 8.5, zl = uz + (end.z - uz) * (xl - ux) / (end.x - ux);
+    const start = { x: xl - 0.6, z: zl };
+    const runner = this.pickMate(['ST', 'RW', 'LW', 'CAM']);
+    this.put(runner, start.x, start.z);
+    // three defenders level with him, a gap of 5.8 m either side of the run
+    const dl = [this.pickOpp(['LCB', 'RCB']), this.pickOpp(['RCB', 'LCB']), this.pickOpp(['LB', 'RB'])];
+    this.put(dl[0], xl, zl - 5.8);
+    this.put(dl[1], xl + rand(-0.4, 0.4), zl + 5.8);
+    this.put(dl[2], xl + rand(-0.4, 0.4), zl + (rand(0, 1) < 0.5 ? -1 : 1) * rand(12, 14));
+    for (const o of dl) this.pinned.add(o);
+
+    // the full-back who steps up on the viewer, on the far side of him from the through ball
+    const pr = this.pickOpp(['LM', 'RM', 'LCM', 'RCM']);
+    const hl = heading(U, { x: xl + 9, z: zl + (end.z - zl) * 0.3 }), pa = hl + rsn * 130 * DEG, pd = 4 + this.reach() * rand(0.45, 0.7);
+    const pp = { x: ux + Math.sin(pa) * pd, z: uz + Math.cos(pa) * pd };
+    this.put(pr, pp.x, pp.z);
+    this.pinned.add(pr);
+    this.stalk.set(pr, new THREE.Vector3(pp.x - ux, 0, pp.z - uz));
+
+    this.fillRest(ux, uz * 0.5);
+    this.keepArea(ux, uz, 7.5);
+    const lead0 = { x: ux + 17, z: uz + (end.z - uz) * 17 / (end.x - ux) };
+    this.keepLane(U, lead0, 2.4);
+    this.keepSeg(start, end, 9.6);
+    this.rules.push(() => this.clearMatesSeg(start, end, 4.5));
+    this.clearMatesSeg(start, end, 4.5);
+    this.chainTo(carrier, Math.round(rand(d.passes[0], d.passes[1])));
+
+    this.passer = carrier; this.runner = runner; this.marker = pr; this.line = dl;
+    this.S = start; this.E = end;
+    const len = dist2(start, end) || 1;
+    this.runDir = { x: (end.x - start.x) / len, z: (end.z - start.z) / len };
+    this.runV = 6.5 * this.speed;
+    this.runStarted = false;
+    this.free = runner; this.pressers = [pr];
+    this.watch = { runner: { p: runner, when: () => this.runStarted }, line: { p: dl[1] } };
+  }
+
+  script(dt, user) {
+    const r = this.runner;
+    if (!this.runStarted && this.state === 'incoming' && this.t - this.strikeAt >= 0.25) {
+      this.runStarted = true;
+      this.events.push({ t: this.t, type: 'run' });
+    }
+    if (this.runStarted && !(this.state === 'outcome' && this.outcomeTarget === r)) {
+      r.target.set(this.E.x, 0, this.E.z);
+      r.maxSpeed = this.runV;
+    }
+    // the line steps up together, a few metres, as the ball comes
+    if (this.finalStruck && this.t - this.strikeAt >= 0.2) {
+      for (const o of this.line) {
+        if (this.state === 'outcome' && this.outcomeTarget === o) continue;
+        const b = this.base.get(o);
+        o.target.set(b.x - 3.5, 0, b.z);
+        o.maxSpeed = 4.5 * this.speed;
+      }
+    }
+    if (!this.closeIn(this.marker, user, 3.0, 2.2)) this.stalkUser(this.marker, user, 4);
+  }
+
+  describe(r) {
+    const ch = this.chosen?.target, toRunner = ch === this.runner;
+    const seen = !!this.saw.runner, quick = (this.touchDelay ?? 9) <= 1.0;
+    const lead = this.leadErr;
+    r.runnerSeen = seen;
+    r.quick = quick;
+    r.leadErr = lead;
+    r.correct = toRunner && lead != null && lead <= 1.5 && quick;
+    r.fact = !toRunner ? 'RUNNER MISSED' : lead == null ? 'PASS LOST' : lead <= 1.5 ? `THROUGH BALL ${f1(lead)} M` : `OFF THE RUN ${f1(lead)} M`;
+    r.expected = 'THROUGH BALL INTO THE RUN';
+    r.scenarioScore = (seen ? 25 : 0) + (quick && toRunner ? 25 : 0) + (toRunner && lead != null ? Math.round(50 * clamp(1 - lead / 3.5, 0, 1)) : 0);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// D7 Goalkeeper build-up. A centre back plays it back to you and the strikers jump. One centre
+// back is shut off: play to the other. Both are: go long.
+// ---------------------------------------------------------------------------------------------
+export class GkBuildScenario extends Scenario {
+  static key = 'gkbuild';
+  static roles = ['GK'];
+  static flight = 1.2;
+  static quizOK = false;
+
+  build() {
+    const d = this.diff;
+    const ux = -47 + rand(0, 1.5), uz = rand(-1.5, 1.5);
+    const cb1z = -rand(7, 10), cb2z = rand(7, 10), cbx = -33 + rand(-2, 2);
+    const flip = Math.random() < 0.5; // which centre back plays it back
+    this.userAt(ux, uz, cbx, flip ? cb2z : cb1z);
+    const U = this.U;
+    const lcb = this.pickMate(['LCB']), rcb = this.pickMate(['RCB']);
+    this.put(lcb, cbx + rand(-1, 1), cb1z);
+    this.put(rcb, cbx + rand(-1, 1), cb2z);
+    const passer = flip ? rcb : lcb, other = flip ? lcb : rcb;
+    this.both = Math.random() < 0.4;
+
+    // the strikers jump: one shuts the passer's lane from the front, the other either takes the other
+    // centre back's lane or stays high
+    const s1 = this.pickOpp(['ST1', 'ST2']), s2 = this.pickOpp(['ST2', 'ST1']);
+    const T = this.flightT / this.speed;
+    const dA = rand(4.2, 5.6);
+    const lane = (from, to, k) => ({ x: from.x + (to.x - from.x) * k, z: from.z + (to.z - from.z) * k });
+    // s1 closes the keeper (the viewer) from the passer's side, and stands in the keeper-to-passer lane
+    const l1 = lane(U, passer.pos, 0.72);
+    this.put(s1, l1.x + 0.8, l1.z);
+    const l2 = lane(U, other.pos, 0.72);
+    if (this.both) this.put(s2, l2.x + 0.8, l2.z);
+    else this.put(s2, ux + rand(24, 30), (other.pos.z > 0 ? -1 : 1) * rand(5, 9)); // high, out of the way
+    this.pinned.add(s1); this.pinned.add(s2);
+    this.stalk.set(s1, new THREE.Vector3(s1.pos.x - ux, 0, s1.pos.z - uz));
+    this.stalk.set(s2, new THREE.Vector3(s2.pos.x - ux, 0, s2.pos.z - uz));
+
+    // the long option: a forward with nobody within reach of where it lands
+    const target = this.pickMate(['ST', 'RW', 'LW', 'CAM']);
+    const tz = (other.pos.z > 0 ? 1 : -1) * rand(4, 9), tx = ux + rand(34, 40);
+    this.put(target, tx, tz);
+
+    this.fillRest(-30, 0);
+    const p80 = { x: ux + (tx - ux) * 0.8, z: uz + (tz - uz) * 0.8 };
+    this.keepSeg(p80, { x: tx, z: tz }, 11.5);
+    this.keepArea(tx, tz, 12);
+    this.keepArea(ux, uz, 6, [s1, s2]);
+    if (!this.both) this.keepLane(U, other.pos, 2.2);
+    this.chain = [passer];
+
+    this.passer = passer; this.other = other; this.longMan = target; this.s1 = s1; this.s2 = s2; this.dA = dA;
+    this.free = this.both ? target : other; this.pressers = this.both ? [s1, s2] : [s1];
+    this.watch = { passer: { p: passer }, other: { p: other }, press: { p: s1 }, press2: { p: s2 } };
+  }
+
+  script(dt, user) {
+    // after the back pass the first striker closes the keeper; the second stays on his man
+    if (!this.closeIn(this.s1, user, this.dA, 1.6)) this.stalkUser(this.s1, user, 4);
+    if (!this.both) {
+      if (!this.closeIn(this.s2, user, this.dA + 2.5, 2.5)) this.stalkUser(this.s2, user, 4);
+    } else if (this.finalStruck && this.state !== 'outcome') {
+      // he sits in the other centre back's lane, keeping the same shape
+      const o = this.other.pos;
+      this.s2.target.set(user.x + (o.x - user.x) * 0.72 + 0.8, 0, user.z + (o.z - user.z) * 0.72);
+      this.s2.maxSpeed = 5;
+    } else this.stalkUser(this.s2, user, 4);
+  }
+
+  // a centre back is shut off when a striker is in the lane
+  shut(p) {
+    const u = this.world.userPos(this._u);
+    let m = Infinity;
+    for (const o of [this.s1, this.s2]) m = Math.min(m, laneMargin(u, p.pos, o.pos, 17, false));
+    return m < 1.0;
+  }
+
+  answer() {
+    const sh = this.shutAtArrival || [this.shut(this.passer), this.shut(this.other)];
+    const pShut = sh[0], oShut = sh[1];
+    if (!oShut) return { target: this.other, one: false };
+    if (!pShut) return { target: this.passer, one: false };
+    return { target: this.longMan, one: false };
+  }
+  wrongs() { const a = this.answer().target; return a === this.longMan ? [this.other] : [this.longMan]; }
+
+  valueOf(o) {
+    if (o.kind !== 'pass') return -0.3;
+    const a = this.answer();
+    if (o.target === a.target) return BONUS;
+    if (o.target === this.passer || o.target === this.other) return this.shut(o.target) ? -0.45 : -0.1;
+    return o.target === this.longMan ? -0.2 : -0.15;
+  }
+
+  atArrival() { this.shutAtArrival = [this.shut(this.passer), this.shut(this.other)]; }
+
+  describe(r) {
+    const ch = this.chosen?.target, a = this.answer();
+    const sh = this.shutAtArrival || [this.shut(this.passer), this.shut(this.other)];
+    const both = sh[0] && sh[1];
+    r.correct = !!ch && ch === a.target;
+    r.bothPressed = both;
+    r.sawPressers = !!this.saw.press && (!this.both || !!this.saw.press2);
+    r.fact = both ? 'BOTH CENTRE BACKS SHUT' : 'ONE CENTRE BACK SHUT';
+    r.expected = both ? 'GO LONG' : 'PLAY TO THE OPEN SIDE';
+    r.scenarioScore = r.correct ? (r.sawPressers ? 100 : 65) : (r.sawPressers ? 30 : 0);
+  }
+}
+
 export const SCENARIOS = {
   press: PressScenario,
   switch: SwitchScenario,
@@ -1405,6 +1613,8 @@ export const SCENARIOS = {
   turn: TurnScenario,
   inhibit: InhibitScenario,
   sandwich: SandwichScenario,
+  through: ThroughScenario,
+  gkbuild: GkBuildScenario,
 };
 export const SCENARIO_NAMES = {
   press: 'BLIND-SIDE PRESS',
@@ -1415,5 +1625,7 @@ export const SCENARIO_NAMES = {
   turn: 'RECEIVE AND TURN',
   inhibit: 'INHIBITION',
   sandwich: 'SANDWICH',
+  through: 'LINE STEPS UP',
+  gkbuild: 'KEEPER BUILD-UP',
 };
 export const SCENARIO_ROLES = Object.fromEntries(Object.entries(SCENARIOS).map(([k, C]) => [k, [...C.roles]]));

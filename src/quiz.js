@@ -43,7 +43,7 @@ export function quizScreen(app, q) {
     const g = k.g;
     const titles = {
       nearest: 'WHERE WAS THE NEAREST OPPONENT?', count: 'OPPONENTS WITHIN 10 METRES?', free: 'WHO HAD THE MOST SPACE?',
-      cue: 'WHAT COLOUR FLASHED BEHIND YOU?', cuepos: 'WHERE DID IT FLASH?', backpost: 'WHERE WAS THE BACK-POST RUNNER?',
+      cue: 'WHAT COLOUR FLASHED BEHIND YOU?', cuepos: 'WHERE DID IT FLASH?',
     };
     if (q.type === 'cue') {
       // five colours: a blind guess is one in five
@@ -66,11 +66,9 @@ export function quizScreen(app, q) {
     }
     k.text(titles[q.type], k.w / 2, 90, 56, { weight: 800, align: 'center' });
 
-    // Four lettered spots on the map; one is where the thing happened. type 'cuepos' reads
-    // snap.cue.spots / snap.cue.spot, type 'backpost' reads snap.box.spots / snap.box.spot.
-    if (q.type === 'cuepos' || q.type === 'backpost') {
-      const src = q.type === 'cuepos' ? q.snap.cue : q.snap.box;
-      const spots = src.spots, right = src.spot;
+    // Four lettered spots on the map; one is where the cued player stood (snap.cue.spots, snap.cue.spot).
+    if (q.type === 'cuepos') {
+      const spots = q.snap.cue.spots, right = q.snap.cue.spot;
       const size = 600, x0 = (k.w - size) / 2, y0 = 130;
       const m = mapper(q.snap, x0, y0, size);
       g.save();

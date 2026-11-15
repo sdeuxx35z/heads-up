@@ -17,6 +17,7 @@ export function sessionMetrics(results) {
     body: bodies.length ? bodies.filter((r) => r.body === 'HALF-TURN' || r.body === 'OPEN').length / bodies.length : null,
     decision: num('decision'),
     memory: num('memory'),
+    scenario: num('scenarioScore'),
     complete: results.filter((r) => ['completed', 'tight', 'goal'].includes(r.outcome)).length / n,
     score: num('total'),
   };

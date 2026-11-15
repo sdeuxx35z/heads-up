@@ -152,14 +152,13 @@ export function practice(app) {
     // drills open up as career lessons introduce them
     const open = unlockedDrills(store.profile);
     if (!open.has(p.drill)) p.drill = 'match';
-    const half = Math.ceil(DRILL_KEYS.length / 2);
     const isOpen = (d) => open.has(d);
-    row(DRILL_KEYS.slice(0, half), 'x', 140, 72, p.drill, (v) => (p.drill = v), 26, isOpen, (d) => DRILL_NAMES[d]);
-    row(DRILL_KEYS.slice(half), 'x', 224, 72, p.drill, (v) => (p.drill = v), 26, isOpen, (d) => DRILL_NAMES[d]);
-    row(ROLE_KEYS, 'r', 318, 76, p.role, (v) => (p.role = v), 30);
-    row(DIFF_KEYS, 'd', 406, 76, p.difficulty, (v) => (p.difficulty = v));
-    if (p.drill === 'match') row(['QUIZ OFF', 'QUIZ SOME', 'QUIZ EVERY REP'], 'q', 494, 76, p.quiz, (v) => (p.quiz = v));
-    row([5, 10, 20], 'n', p.drill === 'match' ? 582 : 494, 76, p.reps, (v) => (p.reps = v));
+    const per = Math.ceil(DRILL_KEYS.length / 3);
+    for (let i = 0; i < 3; i++) row(DRILL_KEYS.slice(i * per, (i + 1) * per), 'x', 132 + i * 72, 62, p.drill, (v) => (p.drill = v), 25, isOpen, (d) => DRILL_NAMES[d]);
+    row(ROLE_KEYS, 'r', 362, 70, p.role, (v) => (p.role = v), 30);
+    row(DIFF_KEYS, 'd', 444, 70, p.difficulty, (v) => (p.difficulty = v));
+    if (p.drill === 'match') row(['QUIZ OFF', 'QUIZ SOME', 'QUIZ EVERY REP'], 'q', 526, 70, p.quiz, (v) => (p.quiz = v));
+    row([5, 10, 20], 'n', p.drill === 'match' ? 608 : 526, 70, p.reps, (v) => (p.reps = v));
     k.button('back', 70, 690, 200, 80, 'BACK', { size: 36, onClick: () => app.go('home') });
     k.button('start', k.w - 70 - 360, 690, 360, 80, 'START', { primary: true, size: 44, onClick: () => app.startPractice() });
   };
