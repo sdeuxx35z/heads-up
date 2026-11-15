@@ -56,6 +56,10 @@ class App {
     this.inXR = false;
     this.xrSupported = false;
     this.look = { yaw: 0, pitch: 0 };
+    this.keys = new Set();
+    this.moveSpeed = 0;
+    this.stepClock = 0;
+    this.buildVignette();
 
     this.setupDesktopInput();
     this.setupXR();
@@ -107,12 +111,15 @@ class App {
     addEventListener('keydown', (e) => {
       this.audio.unlock();
       if (e.key === 'Escape') this.mode === 'paused' ? this.resume() : this.pauseGame();
-      const turn = { ArrowLeft: 1, a: 1, ArrowRight: -1, d: -1 }[e.key];
+      const turn = { ArrowLeft: 1, ArrowRight: -1 }[e.key];
       if (turn) this.keyTurn = turn;
+      this.keys.add(e.key.toLowerCase());
     });
     addEventListener('keyup', (e) => {
-      if (['ArrowLeft', 'a', 'ArrowRight', 'd'].includes(e.key)) this.keyTurn = 0;
+      if (['ArrowLeft', 'ArrowRight'].includes(e.key)) this.keyTurn = 0;
+      this.keys.delete(e.key.toLowerCase());
     });
+    addEventListener('blur', () => this.keys.clear());
   }
 
   mouseRay() {
@@ -245,6 +252,98 @@ class App {
     }
   }
 
+  // tunnel vignette that closes in while you run, for comfort
+  buildVignette() {
+    const c = document.createElement('canvas');
+    c.width = c.height = 256;
+    const g = c.getContext('2d');
+    const grad = g.createRadialGradient(128, 128, 40, 128, 128, 128);
+    grad.addColorStop(0, 'rgba(0,0,0,0)');
+    grad.addColorStop(0.55, 'rgba(0,0,0,0)');
+    grad.addColorStop(1, 'rgba(0,0,0,1)');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 256, 256);
+    const tex = new THREE.CanvasTexture(c);
+    this.vignette = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.62), new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0, depthTest: false, depthWrite: false }));
+    this.vignette.position.z = -0.2;
+    this.vignette.renderOrder = 8;
+    this.vignette.visible = false;
+    this.camera.add(this.vignette);
+  }
+
+  // Left stick runs (click it in to sprint), right stick snap-turns. WASD + Shift on desktop.
+  locomotion(dt) {
+    const rep = this.rep;
+    const canMove = this.mode === 'play' && rep && (rep.state === 'buildup' || rep.state === 'incoming');
+    let ix = 0, iy = 0, sprint = false, dirYaw = this.world.headYaw(), turn = 0;
+    if (this.inXR) {
+      const session = this.renderer.xr.getSession();
+      for (const src of session?.inputSources || []) {
+        const gp = src.gamepad;
+        if (!gp || gp.axes.length < 4) continue;
+        if (src.handedness === 'left') {
+          ix = gp.axes[2]; iy = gp.axes[3];
+          sprint = !!gp.buttons[3]?.pressed || this.sprintLatch;
+          // a stick click latches sprint until the stick is let go
+          if (gp.buttons[3]?.pressed) this.sprintLatch = true;
+          const c = this.controllers.find((k) => k.userData.source === src);
+          if (c) {
+            const d = new THREE.Vector3(0, 0, -1).transformDirection(c.matrixWorld);
+            dirYaw = Math.atan2(d.x, d.z);
+          }
+        } else if (src.handedness === 'right') turn = gp.axes[2];
+      }
+    } else {
+      const k = this.keys;
+      iy = (k.has('s') ? 1 : 0) - (k.has('w') ? 1 : 0);
+      ix = (k.has('d') ? 1 : 0) - (k.has('a') ? 1 : 0);
+      sprint = k.has('shift');
+    }
+    // snap turn on the right stick, one step per flick
+    if (Math.abs(turn) > 0.7 && !this.turnHeld && ['play', 'menu', 'card', 'summary', 'replay'].includes(this.mode)) {
+      this.turnHeld = true;
+      const step = (Math.sign(turn) * -Math.PI) / 6;
+      this.world.placeUser(this.world.userPos(), this.world.headYaw() + step);
+    } else if (Math.abs(turn) < 0.3) this.turnHeld = false;
+
+    let mag = Math.hypot(ix, iy);
+    if (mag < 0.15) { mag = 0; this.sprintLatch = false; }
+    let target = 0;
+    if (canMove && mag > 0) {
+      target = (sprint ? 7.2 : 4) * Math.min(1, mag);
+      if (rep.state === 'incoming') target = Math.min(target, 3);
+    }
+    // ease in and out so starts and stops aren't a jolt
+    this.moveSpeed += (target - this.moveSpeed) * Math.min(1, dt * (target > this.moveSpeed ? 4 : 7));
+    if (this.moveSpeed > 0.05 && mag > 0 && canMove) {
+      const fx = Math.sin(dirYaw), fz = Math.cos(dirYaw); // forward
+      const rx = -Math.cos(dirYaw), rz = Math.sin(dirYaw); // right
+      let mx = fx * -iy + rx * ix, mz = fz * -iy + rz * ix;
+      const l = Math.hypot(mx, mz) || 1;
+      mx /= l; mz /= l;
+      const u = this.world.userPos();
+      const nx = THREE.MathUtils.clamp(u.x + mx * this.moveSpeed * dt, -52, 52);
+      const nz = THREE.MathUtils.clamp(u.z + mz * this.moveSpeed * dt, -33.5, 33.5);
+      this.world.moveUser(nx - u.x, nz - u.z);
+      rep.motion = false; // you're running yourself now
+      this.stepClock -= dt * (1.6 + this.moveSpeed * 0.32);
+      if (this.stepClock <= 0) { this.stepClock = 1; this.audio.step(this.moveSpeed / 7.2); }
+    } else if (!canMove) this.moveSpeed = 0;
+
+    // the ball is played to where you are now, not where you were when it was struck
+    if (rep?.state === 'incoming' && this.world.ball.flight) {
+      const f = this.world.ball.flight, u = this.world.userPos();
+      const from = f.from;
+      const dir = new THREE.Vector3(from.x - u.x, 0, from.z - u.z).normalize();
+      f.to.set(u.x + dir.x * 0.6, 0.11, u.z + dir.z * 0.6);
+    }
+
+    const vm = this.vignette.material;
+    const want = store.settings.vignette !== false && this.inXR ? Math.min(0.9, this.moveSpeed / 7.2) : 0;
+    vm.opacity += (want - vm.opacity) * Math.min(1, dt * 6);
+    this.vignette.visible = vm.opacity > 0.02;
+  }
+
   pollButtons() {
     if (!this.inXR) return;
     // holding the trigger (or a pinch) on empty space for a second pauses, so hand tracking can pause too
@@ -362,7 +461,8 @@ class App {
     const scans = rep.scans.length + (rep.inScan ? 1 : 0);
     const pass = this.inXR ? 'POINT AT A TEAMMATE · PULL THE TRIGGER' : 'CLICK A TEAMMATE TO PASS';
     let text = null;
-    if (rep.state === 'buildup') text = scans === 0 ? (s.index === 0 ? 'LOOK OVER YOUR SHOULDER' : null) : `SCANS ${scans}`;
+    const move = this.inXR ? 'LEFT STICK RUNS · CLICK IT TO SPRINT' : 'WASD RUNS · SHIFT SPRINTS';
+    if (rep.state === 'buildup') text = scans === 0 ? (s.index === 0 ? 'LOOK OVER YOUR SHOULDER' : move) : `SCANS ${scans}`;
     else if (rep.state === 'incoming' || rep.state === 'decide') text = s.index < 2 ? pass : null;
     if (s.index === 2) text = rep.state === 'buildup' && scans ? `SCANS ${scans}` : null;
     if (text === this.hintText) return;
@@ -672,6 +772,7 @@ class App {
       this.camera.rotation.set(this.look.pitch, this.look.yaw, 0);
     }
     this.pollButtons();
+    this.locomotion(dt);
 
     const fm = this.fade.material;
     fm.opacity += (this.fadeTo - fm.opacity) * Math.min(1, dt * 8);

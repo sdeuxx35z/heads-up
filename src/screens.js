@@ -172,15 +172,17 @@ export function settings(app) {
       k.button(id + 'on', k.w - 70 - 300, y, 140, 76, 'ON', { active: s[key], size: 34, onClick: () => { s[key] = true; store.save(); after?.(); app.redraw(); } });
       k.button(id + 'off', k.w - 70 - 145, y, 140, 76, 'OFF', { active: !s[key], size: 34, onClick: () => { s[key] = false; store.save(); after?.(); app.redraw(); } });
     };
-    toggle('mv', 'MOVE WITH PLAY', 170, 'motion');
-    toggle('st', 'SEATED', 266, 'seated', () => app.applySettings());
-    toggle('tk', 'CLICK ON EACH SCAN', 362, 'ticks', () => app.applySettings());
-    k.text('VOLUME', 70, 510, 44);
-    k.button('vdn', k.w - 70 - 300, 458, 90, 76, '–', { size: 48, onClick: () => { s.volume = Math.max(0, +(s.volume - 0.1).toFixed(1)); store.save(); app.applySettings(); app.redraw(); } });
-    k.text(String(Math.round(s.volume * 10)), k.w - 70 - 155, 510, 48, { align: 'center' });
-    k.button('vup', k.w - 70 - 90, 458, 90, 76, '+', { size: 48, onClick: () => { s.volume = Math.min(1, +(s.volume + 0.1).toFixed(1)); store.save(); app.applySettings(); app.redraw(); } });
+    toggle('mv', 'AUTO RUN WITH PLAY', 150, 'motion');
+    toggle('st', 'SEATED', 236, 'seated', () => app.applySettings());
+    toggle('tk', 'CLICK ON EACH SCAN', 322, 'ticks', () => app.applySettings());
+    if (s.vignette === undefined) s.vignette = true;
+    toggle('vg', 'DIM EDGES WHEN RUNNING', 408, 'vignette');
+    k.text('VOLUME', 70, 546, 44);
+    k.button('vdn', k.w - 70 - 300, 494, 90, 76, '–', { size: 48, onClick: () => { s.volume = Math.max(0, +(s.volume - 0.1).toFixed(1)); store.save(); app.applySettings(); app.redraw(); } });
+    k.text(String(Math.round(s.volume * 10)), k.w - 70 - 155, 546, 48, { align: 'center' });
+    k.button('vup', k.w - 70 - 90, 494, 90, 76, '+', { size: 48, onClick: () => { s.volume = Math.min(1, +(s.volume + 0.1).toFixed(1)); store.save(); app.applySettings(); app.redraw(); } });
     const armed = app.resetArmed;
-    k.button('reset', 70, 580, k.w - 140, 76, armed ? `CLEAR ${store.profile.name}? PRESS AGAIN` : `CLEAR ${store.profile.name}`, {
+    k.button('reset', 70, 590, k.w - 140, 76, armed ? `CLEAR ${store.profile.name}? PRESS AGAIN` : `CLEAR ${store.profile.name}`, {
       size: 34,
       onClick: () => {
         if (!armed) { app.resetArmed = true; app.redraw(); return; }

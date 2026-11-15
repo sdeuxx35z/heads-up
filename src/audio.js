@@ -115,6 +115,21 @@ export class Audio {
     n.start(t); n.stop(t + 0.08);
   }
 
+  // your own footsteps on grass: soft low thuds, louder when sprinting
+  step(k = 0.5) {
+    if (!this.ctx) return;
+    const c = this.ctx, t = c.currentTime;
+    const n = this.src();
+    const lp = c.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = 380 + k * 300;
+    const g = c.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.12 + k * 0.18, t + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.09);
+    n.connect(lp).connect(g).connect(this.master);
+    n.start(t, Math.random()); n.stop(t + 0.12);
+  }
+
   touch(pan = 0, far = 0) { this.kick(0.35, pan, far); }
 
   // a burst of applause: many short noise claps
