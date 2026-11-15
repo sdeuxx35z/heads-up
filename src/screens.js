@@ -1,6 +1,6 @@
 import { DRILL_KEYS, DRILL_NAMES } from './drills.js';
-import { UI, ROLES, ROLE_KEYS, DIFF_KEYS, CAREER, STAGES, OBJECTIVE_LABEL } from './config.js';
-import { nextLesson, dailyDrill, streak, weakSpot, rating, unlockedDrills, formatMetric } from './career.js';
+import { UI, ROLES, ROLE_KEYS, DIFF_KEYS, CAREER, STAGES, OBJECTIVE_LABEL, DRILL_GOALS, LESSON_GOALS } from './config.js';
+import { nextLesson, dailyDrill, streak, weakSpot, rating, unlockedDrills, formatMetric, repValue } from './career.js';
 import { store } from './store.js';
 import { GLASS, edge } from './ui.js';
 
@@ -179,7 +179,7 @@ export function stats(app, mounted = false) {
       ['RATING', r == null ? '—' : String(r)],
       ['REPS', String(t.reps)],
       ['STREAK', st ? `${st}` : '—'],
-      ['SCANS VS PAR', formatMetric('rate', avg('rate'))],
+      ['SCAN RATE', formatMetric('rate', avg('rate'))],
       ['TIMING', avg('timing') == null ? '—' : `${Math.round(avg('timing'))}%`],
       ['CRITICAL', formatMetric('critical', avg('critical'))],
     ];
@@ -216,7 +216,7 @@ export function stats(app, mounted = false) {
       line((x) => x.score, UI.accent);
       line((x) => (x.metrics?.rate != null ? x.metrics.rate * 100 : null), '#f2f0e8');
       k.text('SCORE', cx + cw - 40, cy + 44, 28, { align: 'right', color: UI.accent });
-      k.text('SCANS VS PAR', cx + cw - 150, cy + 44, 28, { align: 'right', color: UI.text });
+      k.text('SCAN RATE', cx + cw - 150, cy + 44, 28, { align: 'right', color: UI.text });
     }
     if (!mounted) k.button('back', 70, 690, 200, 80, 'BACK', { size: 36, onClick: () => app.go('home') });
   };
@@ -239,9 +239,9 @@ export function settings(app) {
     const onOff = [[true, 'ON'], [false, 'OFF']];
     if (s.vignette === undefined) s.vignette = true;
     pick('sr', 'RUN WHERE YOUR LEFT HAND POINTS', 146, 'steer', [['hand', 'HAND'], ['head', 'HEAD']]);
-    pick('mv', 'AUTO RUN WITH PLAY', 226, 'motion', onOff);
-    pick('st', 'SEATED', 306, 'seated', onOff);
-    pick('tk', 'CLICK ON EACH SCAN', 386, 'ticks', onOff);
+    pick('mv', 'RIGHT STICK TURNS', 226, 'snapTurn', onOff);
+    pick('st', 'EYE HEIGHT', 306, 'height', [['auto', 'PLAYER'], ['real', 'MINE']]);
+    pick('co', 'COACH PROMPTS IN PLAY', 386, 'coach', onOff);
     pick('vg', 'DIM EDGES WHEN RUNNING', 466, 'vignette', onOff);
     k.text('VOLUME', 70, 596, 40);
     k.button('vdn', k.w - 70 - 300, 546, 90, 70, '–', { size: 46, onClick: () => { s.volume = Math.max(0, +(s.volume - 0.1).toFixed(1)); store.save(); app.applySettings(); app.redraw(); } });
@@ -278,6 +278,26 @@ const OUTCOME = {
   lost: ['LOST THE BALL', UI.bad], goal: ['GOAL', UI.good], saved: ['SAVED', UI.text], blocked: ['BLOCKED', UI.bad],
 };
 
+// Before a lesson (and before each new drill in a mixed session): what to do, how it's graded, the controls.
+export function brief(app, { title, drill, role, lesson, firstOfLesson }) {
+  return (k) => {
+    k.bg();
+    const goal = (firstOfLesson && lesson && LESSON_GOALS[lesson.name]) || DRILL_GOALS[drill] || DRILL_GOALS.match;
+    k.text(title, 70, 112, 60, { weight: 800, color: GLASS.dim });
+    k.text(`${DRILL_NAMES[drill] || 'MATCH'} · ${ROLES[role]?.name || ''}`, k.w - 70, 112, 36, { align: 'right', color: GLASS.dim });
+    k.text(goal[0], 70, 250, 74, { weight: 800 });
+    k.text(goal[1], 70, 350, 58, { weight: 800, color: UI.accent });
+    if (lesson?.objective) {
+      const [key, need] = lesson.objective;
+      k.card(70, 410, k.w - 140, 84, 22);
+      k.text(`TO PASS: ${OBJECTIVE_LABEL[key](need)}`, 100, 465, 38);
+    }
+    const ctl = app.inXR ? 'TRIGGER: PASS   ·   LEFT STICK: RUN   ·   HOLD B: PAUSE' : 'CLICK A TEAMMATE: PASS   ·   WASD: RUN   ·   ESC: PAUSE';
+    k.text(ctl, k.w / 2, 560, 32, { align: 'center', color: GLASS.dim, weight: 700 });
+    k.button('start', 70, 620, k.w - 140, 130, 'START', { primary: true, size: 64, onClick: () => app.startPlay() });
+  };
+}
+
 const CRIT = { prime: ['PRIME', UI.good], critical: ['CRITICAL', UI.good], late: ['LATE EYES', UI.bad], none: ['NONE', UI.bad] };
 const tone = (v) => (v == null ? GLASS.dim : v >= 70 ? UI.good : v >= 40 ? UI.text : UI.bad);
 
@@ -285,6 +305,14 @@ export function repCard(app, r, index, count) {
   return (k) => {
     k.bg();
     k.text(`${index + 1} / ${count}`, 60, 92, 40, { color: GLASS.dim });
+    // did this rep hit the lesson's goal?
+    const lesson = app.session?.level != null ? CAREER[app.session.level] : null;
+    if (lesson?.objective) {
+      const [key, need] = lesson.objective;
+      const v = repValue(key, r);
+      const hit = v != null && v >= need;
+      k.text(`${OBJECTIVE_LABEL[key](need)} · THIS REP ${formatMetric(key, v)}`, 200, 92, 34, { color: v == null ? GLASS.dim : hit ? UI.good : UI.bad });
+    }
     const [label, col] = OUTCOME[r.outcome] || ['', UI.text];
     k.text(label, k.w - 60, 92, 44, { align: 'right', color: col });
     k.text(String(r.total), 60, 300, 200, { weight: 800 });
@@ -297,7 +325,7 @@ export function repCard(app, r, index, count) {
       : `YOU #${chosenNo ?? '—'} · BEST #${bestNo ?? '—'}${r.reason ? ' · ' + r.reason : ''}`;
     const taught = app.taught();
     const rows = [
-      ['SCANS', rate == null ? '—' : `${rate.toFixed(1)} PER 10 S · PAR ${r.par}`, ratePct == null ? null : Math.min(100, ratePct)],
+      ['SCANS', rate == null ? '—' : `${rate.toFixed(1)} PER 10 S · TARGET ${r.par}`, ratePct == null ? null : Math.min(100, ratePct)],
       taught.has('timing') && ['TIMING', r.timing == null ? '—' : `${r.badScans || 0} AT A TOUCH`, r.timing],
       taught.has('critical') && ['CRITICAL', r.critical == null ? 'SHORT PASS' : CRIT[r.critical]?.[0] || '—', r.critical == null ? null : { prime: 100, critical: 80, none: 20, late: 0 }[r.critical]],
       taught.has('info') && ['WHAT YOU SAW', r.sawPresser === false ? 'PRESSER MISSED' : r.sawBest === false ? `#${r.bestNumber} MISSED` : '', r.info],
@@ -361,7 +389,7 @@ export function summary(app, s, starsEarned, nextLevel) {
       k.text(OBJECTIVE_LABEL[o.key](o.need), 98, cy + 50, 34);
       k.text(o.passed ? `YOURS ${formatMetric(o.key, o.got)}` : `YOURS ${formatMetric(o.key, o.got)} · NOT YET`, 98, cy + 96, 32, { color: o.passed ? UI.good : UI.bad, weight: 700 });
       cy += 132;
-      if (!o.passed && o.lowScans) k.text('SCANS UNDER 30% OF PAR', 70, cy + 20, 30, { color: UI.text });
+      if (!o.passed && o.lowScans) k.text('SCAN RATE UNDER 30% OF TARGET', 70, cy + 20, 30, { color: UI.text });
       else if (!o.passed && s.worst) k.text(`REP ${s.worst.rep}: ${s.worst.why}`, 70, cy + 20, 30, { color: UI.text });
     }
     const delta = s.ratingBefore != null && s.ratingAfter != null ? s.ratingAfter - s.ratingBefore : null;
@@ -369,7 +397,7 @@ export function summary(app, s, starsEarned, nextLevel) {
     if (line) k.text(line, 70, 640, 30, { color: GLASS.dim });
     const m = s.metrics || {};
     const rows = [
-      ['SCANS VS PAR', formatMetric('rate', m.rate)],
+      ['SCAN RATE VS TARGET', formatMetric('rate', m.rate)],
       ['TIMING', m.timing == null ? '—' : `${Math.round(m.timing)}%`],
       ['CRITICAL SCANS', formatMetric('critical', m.critical)],
       ['WHAT YOU SAW', formatMetric('info', m.info)],

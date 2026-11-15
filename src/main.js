@@ -7,7 +7,7 @@ import { DRILLS } from './drills.js';
 import { Panel, Pointer } from './ui.js';
 import { Audio } from './audio.js';
 import { store } from './store.js';
-import { CAREER } from './config.js';
+import { CAREER, DRILL_GOALS, LESSON_GOALS } from './config.js';
 import * as S from './screens.js';
 import { makeQuiz, quizScreen } from './quiz.js';
 import { sessionMetrics, checkObjective, nextLesson, dailyDrill, weakSpot, currentLevel, rating, streak, unlockedDrills } from './career.js';
@@ -111,6 +111,9 @@ class App {
     this.stepClock = 0;
     this.buildVignette();
     this.buildAttackMarkers();
+    this.countdown = new THREE.Mesh(new THREE.RingGeometry(0.34, 0.42, 40), new THREE.MeshBasicMaterial({ color: 0xff7a1a, transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide }));
+    this.countdown.visible = false;
+    this.scene.add(this.countdown);
 
     this.setupDesktopInput();
     this.setupXR();
@@ -403,7 +406,8 @@ class App {
     }
 
     // snap turn on the right stick, one step per flick, with a short blink
-    if (Math.abs(turn) > 0.7 && !this.turnHeld && ['play', 'menu', 'card', 'summary', 'replay'].includes(this.mode)) {
+    // off by default: in a scanning trainer you look around with your head, not the stick
+    if (store.settings.snapTurn && Math.abs(turn) > 0.7 && !this.turnHeld && ['play', 'menu', 'card', 'summary', 'replay'].includes(this.mode)) {
       this.turnHeld = true;
       this.world.placeUser(this.world.userPos(), this.world.headYaw() + (Math.sign(turn) * -Math.PI) / 6);
       this.fade.material.opacity = Math.max(this.fade.material.opacity, 0.5);
@@ -523,11 +527,15 @@ class App {
     this.rig.position.y = this.eyeOffset();
   }
 
-  // seated players get lifted to a standing eye height, measured from where their head actually is
+  // Eyes at a player's eye height whatever the headset reports: seated, short, or a floor the
+  // headset put in the wrong place all end up level with the players. 'real' keeps your true height.
   eyeOffset() {
-    if (!this.inXR || !store.settings.seated) return 0;
-    return Math.max(0, 1.65 - (this.camera.position.y || 1.2));
+    if (!this.inXR || store.settings.height === 'real') return 0;
+    const local = this.camera.getWorldPosition(_v1).y - this.rig.position.y;
+    return Math.max(0, 1.62 - local);
   }
+
+  levelEyes() { this.rig.position.y = this.eyeOffset(); }
 
   headPos() {
     const v = new THREE.Vector3();
@@ -547,6 +555,7 @@ class App {
     this.inLocker = true;
     this.stadium.group.visible = false;
     this.stadium.setEnvironment('locker');
+    this.levelEyes();
     this.locker.show();
     this.world.clearOverlays();
     for (const p of [...this.world.homeSets.values()].flat().concat(this.world.away)) p.setVisible(false);
@@ -728,18 +737,58 @@ class App {
     if (rep.state === 'buildup') text = scans === 0 ? (s.index === 0 ? 'LOOK OVER YOUR SHOULDER' : move) : s.index === 0 ? prText : `SCANS ${scans}`;
     else if (rep.state === 'incoming' || rep.state === 'decide') text = s.index < 2 ? pass : null;
     if (s.index === 2) text = rep.state === 'buildup' && scans ? `SCANS ${scans}` : null;
+    this.showHint(text, true);
+  }
+
+  showHint(text, skip = false) {
     if (text === this.hintText) return;
     this.hintText = text;
     if (!text) { this.hint.hide(); return; }
     this.hint.show((k) => {
       k.bg(60);
-      k.text(text, (k.w - 200) / 2, k.h / 2 + 4, 62, { align: 'center', base: 'middle', weight: 800 });
-      k.button('skip', k.w - 190, 30, 160, k.h - 60, 'SKIP', { size: 40, onClick: () => this.skipTutorial() });
+      k.text(text, skip ? (k.w - 200) / 2 : k.w / 2, k.h / 2 + 4, text.length > 30 ? 52 : 62, { align: 'center', base: 'middle', weight: 800 });
+      if (skip) k.button('skip', k.w - 190, 30, 160, k.h - 60, 'SKIP', { size: 40, onClick: () => this.skipTutorial() });
     });
     if (!this.hintPlaced) {
       this.hintPlaced = true;
       this.hint.placeFacing(this.headPos(), this.world.headYaw(), 3.2, 0.75);
     }
+  }
+
+  // Live prompts in normal sessions: what to do right now, and how many looks so far.
+  coachStep() {
+    const s = this.session, rep = this.rep;
+    if (!s || s.tutorial || !rep) return;
+    if (!store.settings.coach) return this.showHint(null);
+    const lesson = s.level != null ? CAREER[s.level] : null;
+    const scans = rep.scans.length + (rep.inScan ? 1 : 0);
+    const early = (this.repsOfDrill?.[rep.drillKey] || 0) <= 2;
+    const goal = (lesson && LESSON_GOALS[lesson.name]) || DRILL_GOALS[rep.drillKey] || DRILL_GOALS.match;
+    const scanLesson = lesson && ['scan', 'rate', 'timing', 'critical', 'info'].includes(lesson.teaches);
+    let text = null;
+    if (rep.state === 'buildup') text = early && scans === 0 ? goal[0] : `LOOKS ${scans}`;
+    else if (rep.state === 'incoming') text = lesson?.teaches === 'critical' ? 'BALL COMING · ONE LAST LOOK' : scanLesson ? `BALL COMING · LOOKS ${scans}` : 'BALL COMING';
+    else if (rep.state === 'decide') text = this.inXR ? 'PASS · POINT AND PULL THE TRIGGER' : 'PASS · CLICK A TEAMMATE';
+    this.showHint(text);
+  }
+
+  // a ring round the ball at your feet that runs down until the presser takes it
+  updateCountdown() {
+    const rep = this.rep, ring = this.countdown;
+    const on = this.mode === 'play' && rep?.state === 'decide' && rep.window > 0 && !this.session?.tutorial;
+    ring.visible = !!on;
+    if (!on) return;
+    const left = Math.max(0, 1 - rep.decideT / rep.window);
+    const theta = Math.round(left * 48) / 48 * Math.PI * 2;
+    if (theta !== this.countdownTheta) {
+      this.countdownTheta = theta;
+      ring.geometry.dispose();
+      ring.geometry = new THREE.RingGeometry(0.34, 0.42, 40, 1, Math.PI / 2, Math.max(0.001, theta));
+      ring.geometry.rotateX(-Math.PI / 2);
+      ring.material.color.setHex(left < 0.35 ? 0xff5a4f : 0xff7a1a);
+    }
+    const b = this.world.ball.pos;
+    ring.position.set(b.x, 0.03, b.z);
   }
 
   // stereo position and distance of the ball relative to the head
@@ -797,11 +846,33 @@ class App {
     this.hideHint();
     this.quiz = null;
     this.setFade(1, true);
+    this.levelEyes();
     this.rep.start();
     if (s.minFlight) this.rep.minFlight = s.minFlight; // start() resets it
     this.look.pitch = 0;
     this.setFade(0);
     this.holdT = 0.6; // breathing room before the first pass
+    this.repsOfDrill = this.repsOfDrill || {};
+    if (s.index === 0) this.repsOfDrill = {};
+    const firstOfDrill = !this.repsOfDrill[drill];
+    this.repsOfDrill[drill] = (this.repsOfDrill[drill] || 0) + 1;
+    // explain a drill the first time you ever meet it, and always at the start of a session
+    const briefed = store.data.briefed || (store.data.briefed = []);
+    if (!s.tutorial && firstOfDrill && (s.index === 0 || !briefed.includes(drill))) {
+      if (!briefed.includes(drill)) { briefed.push(drill); store.save(); }
+      const lesson = s.level != null ? CAREER[s.level] : null;
+      const title = lesson ? `${String(s.level + 1).padStart(2, '0')} · ${lesson.name}` : s.daily ? 'DAILY DRILL' : s.weak ? 'WEAK SPOT' : 'PRACTICE';
+      this.mode = 'brief';
+      this.panel.show(S.brief(this, { title, drill, role: this.rep.roleKey || role, lesson, firstOfLesson: s.index === 0 }));
+      this.placePanel(-0.05, 2.2);
+    }
+  }
+
+  startPlay() {
+    if (this.mode !== 'brief') return;
+    this.panel.hide();
+    this.mode = 'play';
+    this.holdT = 0.6;
   }
 
   setFade(v, instant = false) {
@@ -1113,6 +1184,7 @@ class App {
     }
     this.locomotion(dt);
     this.updateAttackMarkers(dt);
+    this.updateCountdown();
 
     const fm = this.fade.material;
     fm.opacity += (this.fadeTo - fm.opacity) * Math.min(1, dt * (this.fadeTo > fm.opacity ? 16 : 8));
@@ -1128,6 +1200,7 @@ class App {
       if (this.holdT > 0) this.holdT -= dt;
       else this.rep.update(dt);
       this.tutorialStep();
+      this.coachStep();
       const ray = this.activeRay();
       if (ray) this.rep.aim(ray.origin, ray.dir);
       if (this.rep.state === 'quiz' && !this.quiz) {

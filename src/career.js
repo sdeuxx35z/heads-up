@@ -40,6 +40,19 @@ export function checkObjective(lesson, metrics, fails = 0) {
   return { key, need, got, lowScans, passed: got != null && got >= need && !lowScans };
 }
 
+export function repValue(key, r) {
+  return ({
+    rate: r.scanRate10 != null && r.par ? r.scanRate10 / r.par : null,
+    timing: r.timing == null ? 0 : r.timing,
+    critical: r.critical == null ? null : r.critical === 'critical' || r.critical === 'prime' ? 1 : 0,
+    info: r.info, decision: r.decision, memory: r.memory, scenario: r.scenarioScore, score: r.total,
+    body: r.body ? (r.body === 'CLOSED' ? 0 : 1) : null,
+    complete: ['completed', 'tight', 'goal'].includes(r.outcome) ? 1 : 0,
+    correct: r.correct == null ? null : r.correct ? 1 : 0,
+    onetouch: r.oneTouchBack == null ? null : r.oneTouchBack ? 1 : 0,
+  })[key];
+}
+
 export function formatMetric(key, v) {
   if (v == null) return '—';
   if (['rate', 'critical', 'body', 'complete'].includes(key)) return `${Math.round(v * 100)}%`;

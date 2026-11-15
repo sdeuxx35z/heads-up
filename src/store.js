@@ -12,6 +12,8 @@ function load() {
     const raw = JSON.parse(localStorage.getItem(KEY));
     if (raw && Array.isArray(raw.profiles)) {
       // profiles saved before the learning career get the new fields
+      // settings added in later versions get their defaults
+      raw.settings = { motion: false, height: 'auto', snapTurn: false, coach: true, volume: 0.8, ticks: true, ...raw.settings };
       raw.profiles = raw.profiles.map((p, i) => ({ ...blankProfile(i), ...p, passed: p.passed || Array(24).fill(false), fails: p.fails || Array(24).fill(0), dailies: p.dailies || [] }));
       return raw;
     }
@@ -19,7 +21,7 @@ function load() {
   return {
     active: 0,
     profiles: [0, 1, 2].map(blankProfile),
-    settings: { motion: false, seated: false, volume: 0.8, ticks: true },
+    settings: { motion: false, height: 'auto', snapTurn: false, coach: true, volume: 0.8, ticks: true },
   };
 }
 

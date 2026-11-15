@@ -84,8 +84,34 @@ const LESSONS = [
   L('FINAL', { reps: 12, difficulty: 'ELITE', speed: 1.15, quizChance: 0.3, pairs: [['match', 'CB'], ['press', 'CM'], ['turn', 'CDM'], ['switch', 'FB'], ['thirdman', 'CAM'], ['through', 'W'], ['match', 'ST'], ['gkbuild', 'GK'], ['sandwich', 'CM'], ['colour', 'CAM'], ['inhibit', 'CDM'], ['signal', 'ST']], objective: ['score', 68] }),
 ];
 export const CAREER = LESSONS.map((l, i) => ({ ...l, index: i, stage: Math.floor(i / 6) }));
+// What each drill asks of you, in two short lines, shown on the briefing card before you play it.
+export const DRILL_GOALS = {
+  match: ['LOOK AROUND BEFORE THE BALL COMES', 'THEN PASS TO THE BEST TEAMMATE'],
+  rondo: ['5 V 2: KEEP THE BALL', 'PASS PAST THE TWO IN THE MIDDLE'],
+  awareness: ['A PLAYER BEHIND YOU LIGHTS UP', 'REMEMBER THE COLOUR, THEN PASS'],
+  press: ['A PRESSER IS COMING FROM BEHIND', 'SPOT HIM, THEN PASS AWAY FROM HIM'],
+  switch: ['THE NEAR SIDE IS CROWDED', 'FIND THE FREE MAN ON THE FAR SIDE'],
+  thirdman: ['A TEAMMATE RUNS PAST YOUR MARKER', 'AIM AT THE GRASS AHEAD OF HIM'],
+  signal: ['ONE TEAMMATE WAVES, ONE IS FREE', 'PASS TO THE FREE ONE, NOT THE WAVE'],
+  colour: ['A COLOUR FLASHES AS THE BALL COMES', 'PASS TO THAT COLOUR, FIRST TIME'],
+  turn: ['BACK TO GOAL, A PRESSER BEHIND YOU', 'CHECK YOUR SHOULDER: FREE = TURN, PRESSED = PASS BACK'],
+  inhibit: ['A BEEP MEANS YOUR LANE IS CLOSING', 'SWITCH TO ANOTHER PASS, FAST'],
+  sandwich: ['TWO PRESSERS CLOSE IN FROM THE SIDES', 'ONE TOUCH BACK TO THE DEFENDER'],
+  through: ['THE BACK LINE STEPS UP', 'PLAY IN BEHIND ONLY IF HE IS ONSIDE'],
+  gkbuild: ['YOU ARE THE KEEPER', 'PASS TO THE DEFENDER WHO IS NOT PRESSED'],
+};
+// Skill lessons explain the skill instead of the drill.
+export const LESSON_GOALS = {
+  'LOOK AWAY': ['TURN YOUR HEAD AWAY FROM THE BALL', 'LOOK BEHIND YOU, THEN PASS'],
+  TIMING: ['LOOK AWAY WHILE THE BALL TRAVELS', 'EYES BACK ON IT WHEN SOMEONE KICKS IT'],
+  'SCAN RATE': ['LOOK AROUND AGAIN AND AGAIN', 'MORE LOOKS BEFORE THE BALL REACHES YOU'],
+  'CRITICAL SCAN': ['ONE LAST LOOK WHILE THE PASS COMES TO YOU', 'THEN EYES BACK ON THE BALL'],
+  'SAFE OR FORWARD': ['PICK THE PASS THAT MOVES THE TEAM FORWARD', 'WITHOUT GIVING THE BALL AWAY'],
+  'WHERE WAS HE': ['THE SCREEN GOES DARK WHEN THE BALL ARRIVES', 'REMEMBER WHERE THE PLAYERS WERE'],
+};
+
 export const OBJECTIVE_LABEL = {
-  rate: (v) => `SCANS ${Math.round(v * 100)}% OF PAR`, timing: (v) => `TIMING ${v}%`, critical: (v) => `CRITICAL SCAN ${Math.round(v * 100)}% OF REPS`,
+  rate: (v) => `SCAN RATE ${Math.round(v * 100)}% OF TARGET`, timing: (v) => `TIMING ${v}%`, critical: (v) => `CRITICAL SCAN ${Math.round(v * 100)}% OF REPS`,
   info: (v) => `INFO ${v}`, body: (v) => `OPEN BODY ${Math.round(v * 100)}% OF REPS`, decision: (v) => `DECISION ${v}`,
   memory: (v) => `MEMORY ${v}`, correct: (v) => `RIGHT CALL ${Math.round(v * 100)}% OF REPS`, onetouch: (v) => `ONE TOUCH BACK ${Math.round(v * 100)}%`, scenario: (v) => `READ THE SITUATION ${v}`, complete: (v) => `KEEP THE BALL ${Math.round(v * 100)}%`, score: (v) => `SCORE ${v}`,
 };
