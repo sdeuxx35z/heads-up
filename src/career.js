@@ -1,34 +1,43 @@
 import { CAREER } from './config.js';
+import { SCENARIO_ROLES } from './drills.js';
 
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
 
 // Per-session numbers from rep results, in the units the objectives use.
 export function sessionMetrics(results) {
   const n = results.length || 1;
-  const rates = results.filter((r) => r.scanRate10 != null && r.par).map((r) => r.scanRate10 / r.par);
+  // capped per rep, so one frantic rep can't carry two where you never looked
+  const rates = results.filter((r) => r.scanRate10 != null && r.par).map((r) => Math.min(1.2, r.scanRate10 / r.par));
   const crit = results.filter((r) => r.critical != null);
   const bodies = results.filter((r) => r.body);
   const num = (k) => mean(results.map((r) => r[k]).filter((v) => v != null));
+  const share = (f) => { const v = results.filter((r) => f(r) != null); return v.length ? v.filter((r) => f(r)).length / v.length : null; };
   return {
     rate: mean(rates),
-    timing: num('timing'),
+    timing: mean(results.map((r) => (r.timing == null ? 0 : r.timing))),
     critical: crit.length ? crit.filter((r) => r.critical === 'critical' || r.critical === 'prime').length / crit.length : null,
     info: num('info'),
     body: bodies.length ? bodies.filter((r) => r.body === 'HALF-TURN' || r.body === 'OPEN').length / bodies.length : null,
     decision: num('decision'),
     memory: num('memory'),
     scenario: num('scenarioScore'),
+    correct: share((r) => r.correct),
+    onetouch: share((r) => r.oneTouchBack),
     complete: results.filter((r) => ['completed', 'tight', 'goal'].includes(r.outcome)).length / n,
     score: num('total'),
   };
 }
 
 // Whether the session met the lesson's own objective, and by how much.
-export function checkObjective(lesson, metrics) {
+// after two misses the bar drops 10%, so nobody is stuck on one lesson for ever
+export function checkObjective(lesson, metrics, fails = 0) {
   if (!lesson?.objective) return null;
-  const [key, need] = lesson.objective;
+  const [key, base] = lesson.objective;
+  const need = fails >= 2 ? (base < 2 ? Math.round(base * 0.9 * 100) / 100 : Math.round(base * 0.9)) : base;
   const got = metrics[key];
-  return { key, need, got, passed: got != null && got >= need };
+  // every lesson needs some scanning, whatever it grades
+  const lowScans = key !== 'rate' && metrics.rate != null && metrics.rate < 0.3;
+  return { key, need, got, lowScans, passed: got != null && got >= need && !lowScans };
 }
 
 export function formatMetric(key, v) {
@@ -49,22 +58,36 @@ export function unlockedDrills(profile) {
   CAREER.forEach((l, i) => {
     if (!profile.passed?.[i]) return;
     out.add(l.drill);
-    (l.drills || []).forEach((d) => out.add(d));
+    (l.pairs || []).forEach(([d]) => out.add(d));
   });
   return out;
 }
 
 // The same three reps for everyone on a given day, from what this profile has unlocked.
+// local calendar day, so the daily turns over at midnight where you are
+export const dayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+// pace of the lesson you last passed, so dailies and weak-spot work match where you are
+export function currentLevel(profile) {
+  let last = -1;
+  CAREER.forEach((_, i) => { if (profile.passed?.[i]) last = i; });
+  const l = CAREER[Math.max(0, last)];
+  return { difficulty: last < 0 ? 'EASY' : l.difficulty, speed: last < 0 ? 0.9 : l.speed, quiz: profile.passed?.[12] ? 0.34 : 0 };
+}
+
 export function dailyDrill(profile, date = new Date()) {
-  const key = date.toISOString().slice(0, 10);
+  const key = dayKey(date);
   let seed = [...key].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7);
   const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32);
   const drills = [...unlockedDrills(profile)];
   const roles = ['CM', 'CB', 'FB', 'CDM', 'CAM', 'W', 'ST'];
   const picks = Array.from({ length: 3 }, () => drills[Math.floor(rnd() * drills.length)]);
+  // each drill gets a position it was built for
+  const roleFor = (d) => { const rs = SCENARIO_ROLES?.[d] || roles; return rs[Math.floor(rnd() * rs.length)]; };
+  const lv = currentLevel(profile);
   return {
-    key, reps: 3, daily: true, difficulty: profile.passed?.[11] ? 'HARD' : 'MEDIUM', quizChance: 0.34,
-    drills: picks, roles: picks.map(() => roles[Math.floor(rnd() * roles.length)]),
+    key, reps: 3, daily: true, difficulty: lv.difficulty, speed: lv.speed, quizChance: lv.quiz,
+    pairs: picks.map((d) => [d, roleFor(d)]),
   };
 }
 
@@ -73,9 +96,9 @@ export function streak(profile, today = new Date()) {
   const days = new Set(profile.dailies || []);
   let count = 0, misses = 0;
   const d = new Date(today);
-  if (!days.has(d.toISOString().slice(0, 10))) d.setDate(d.getDate() - 1);
+  if (!days.has(dayKey(d))) d.setDate(d.getDate() - 1);
   while (misses < 2) {
-    if (days.has(d.toISOString().slice(0, 10))) { count++; misses = 0; } else misses++;
+    if (days.has(dayKey(d))) { count++; misses = 0; } else misses++;
     d.setDate(d.getDate() - 1);
   }
   return count;

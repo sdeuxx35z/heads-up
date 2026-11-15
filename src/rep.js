@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { ROLES, DIFFICULTY, AWAY_442, GOAL } from './config.js';
+import { ROLES, DIFFICULTY, AWAY_442, GOAL, PITCH } from './config.js';
 import { evaluateOptions, scoreDecision, laneMargin, shotAim, LOFT_OVER, PASS_SPEED } from './eval.js';
 
 const rand = (a, b) => a + Math.random() * (b - a);
@@ -8,12 +8,13 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const angDiff = (a, b) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)));
 const heading = (from, to) => Math.atan2(to.x - from.x, to.z - from.z);
 const DEG = Math.PI / 180;
+const _dir = new THREE.Vector3();
 
 // scan detector (research A1)
 const SCAN_ON = 58 * DEG, SCAN_OFF = 35 * DEG, SCAN_FROM_ANCHOR = 40 * DEG, WAGGLE = 45 * DEG;
 const MIN_SCAN = 0.18, MIN_DWELL = 0.1, MIN_SCAN_AT_TOUCH = 0.08;
 // "saw it": the gaze cone is +-20 deg, held 0.12 s (cumulative, gaps up to 0.35 s forgiven)
-const GAZE_CONE = 20 * DEG, GAZE_HOLD = 0.12, GAZE_GAP = 0.35;
+export const GAZE_CONE = 20 * DEG, GAZE_HOLD = 0.12, GAZE_GAP = 0.35;
 const RING = 512; // head-yaw history, about 4+ s at 120 Hz
 
 // A3: a scan is BAD if it overlaps [touch - 0.10 s, touch + 0.15 s]
@@ -22,7 +23,8 @@ export const TOUCH_BEFORE = 0.1, TOUCH_AFTER = 0.15;
 export const CRIT_MIN_FLIGHT = 0.9, CRIT_AFTER_RELEASE = 0.15, CRIT_BEFORE_ARRIVAL = 0.25, PRIME_EARLY = 0.8, PRIME_LATE = 0.35;
 // A2: scans per 10 s, windows under 3 s are not rated
 export const RATE_WINDOW = 10, MIN_RATE_WINDOW = 3;
-export const PAR = { CM: 5, CDM: 5, CB: 4.5, W: 4, CAM: 4, FB: 3.5, ST: 3, GK: 4.5 };
+// no published keeper benchmark: keepers in build-up look up less often than outfielders
+export const PAR = { CM: 5, CDM: 5, CB: 4.5, W: 4, CAM: 4, FB: 3.5, ST: 3, GK: 3 };
 // seeing the presser buys a little time
 export const AWARE_BONUS = 0.4;
 const PRESS_SLOT = /^(RM|RCM|LCM|LM|ST1|ST2)$/;
@@ -213,7 +215,7 @@ export class Rep {
     let moved = false;
     for (const o of options) {
       const extra = this.scenarioValue(o) || 0;
-      if (extra) { o.value = Math.max(0, o.value + extra); o.scenario = extra; moved = true; }
+      if (extra) { o.value += extra; o.scenario = extra; moved = true; }
     }
     if (moved) options.sort((a, b) => b.value - a.value);
     return options;
@@ -319,6 +321,8 @@ export class Rep {
     this.aimed = null;
     this.result = null;
     this.t = 0;
+    this._kickFx = [];
+    this.snapThisFrame = false;
     this.setupScenario?.();
     this.state = 'buildup';
     this.fx.whistle?.();
@@ -396,6 +400,21 @@ export class Rep {
     this.touches.push({ t: this.t, type, mine });
   }
 
+  // The boot meets the ball `delay` s after ball.kick (Ball.kick holds the ball for the kicker's swing), so
+  // the sound waits too. Sim time, not the wall clock: it runs inside tick.
+  kickSound(vol, delay = 0) {
+    if (!(delay > 0.001)) { this.fx.kick?.(vol); return; }
+    (this._kickFx || (this._kickFx = [])).push({ at: this.t + delay, vol });
+  }
+
+  flushKickFx() {
+    const q = this._kickFx;
+    if (!q || !q.length) return;
+    for (let i = 0; i < q.length;) {
+      if (q[i].at <= this.t + 1e-9) { this.fx.kick?.(q[i].vol); q.splice(i, 1); } else i++;
+    }
+  }
+
   tick(dt) {
     if (this.state === 'quiz' || this.state === 'done' || this.state === 'setup') return;
     if (!this._mInit) this.initMetrics();
@@ -416,6 +435,7 @@ export class Rep {
       const arrived = ball.update(dt);
       if (arrived) this.onArrive();
     }
+    this.flushKickFx();
     // every ball struck while the viewer's team has it is a touch (catches drills that override nextPass)
     if (ball.flight !== this._flightRef) {
       if (ball.flight && (this.state === 'buildup' || this.state === 'incoming')) this.logTouch('kick');
@@ -637,7 +657,7 @@ export class Rep {
       to = cands.length ? cands[0].p : null;
     }
     this.passesLeft--;
-    from.heading = to ? heading(from.pos, to.pos) : heading(from.pos, user);
+    from.turnTo?.(to ? heading(from.pos, to.pos) : heading(from.pos, user)); // Ball.kick swings him round: no heading pop
     this.ballAt(from);
     if (to) {
       const dist = to.pos.distanceTo(from.pos);
@@ -645,7 +665,7 @@ export class Rep {
       ball.kick(ball.pos, land, rand(15, 19) * this.speed, dist > LOFT_OVER ? dist * 0.1 : 0);
       this.receiver = to;
       this.events.push({ t: this.t, type: 'pass' });
-      this.fx.kick?.(0.7);
+      this.kickSound(0.7, ball.flight?.wait);
     } else {
       this.finalBall(from, user);
     }
@@ -671,7 +691,7 @@ export class Rep {
     this.watchedStrike = angDiff(this.world.headYaw(), toBall) < 38 * DEG;
     this.strikeWatchUntil = this.t + 0.3;
     this.triggerPress(user);
-    this.fx.kick?.(0.8);
+    this.kickSound(0.8, ball.flight?.wait);
   }
 
   // The press starts at the strike, from wherever each presser stands. His speed is set so he reaches
@@ -707,7 +727,7 @@ export class Rep {
       this.decideT = 0;
       this.receiveMetrics(user);
       this.knewPressure = this.m.presserSeen !== false;
-      this.window = ((this.diff.window + (this.knewPressure ? AWARE_BONUS : 0)) * this.windowScale) / this.speed;
+      this.window = this.decisionWindow(this.m.presserDist, this.knewPressure);
       if (this.quizWanted) {
         this.snapshot = this.takeSnapshot(user);
         this.state = 'quiz';
@@ -722,6 +742,25 @@ export class Rep {
       const tg = this.outcomeTarget;
       if (tg) this.afterTouchDirs(tg);
     }
+  }
+
+  // How long the viewer has on the ball. A presser covers (distance - 0.8 m) at his closing speed, so a man at
+  // 1.2 m tackles at once: the window is that time, kept between 0.5 s and the difficulty's window, plus a
+  // little for having seen him coming. No presser on the pitch: the difficulty's window.
+  decisionWindow(presserDist, aware) {
+    const cap = (this.diff.window * this.windowScale) / this.speed;
+    let w = cap;
+    if (presserDist != null && this.pressers.length) {
+      const u = this.world.userPos();
+      let near = null, bd = Infinity;
+      for (const o of this.pressers) {
+        const dd = Math.hypot(o.pos.x - u.x, o.pos.z - u.z);
+        if (dd < bd) { bd = dd; near = o; }
+      }
+      const v = Math.max(this.diff.presserSpeed * this.speed * 0.6, near?.pressV || 0);
+      w = clamp((presserDist - 0.8) / v, Math.min(0.5, cap), cap);
+    }
+    return w + (aware ? (AWARE_BONUS * this.windowScale) / this.speed : 0);
   }
 
   // Everything measured about the approach, taken at the first touch (research A2-A6).
@@ -757,8 +796,9 @@ export class Rep {
     m.exitSeen = exit ? mi >= 0 && this.sawMate[mi] >= t - 1.5 : null;
     m.sawBest = !opts.length || opts[0].kind === 'shot' ? true : m.exitSeen;
 
-    // the blind side and both sides, from the head-yaw history
-    const facing = this.smoothedYaw(0.5);
+    // the blind side and both sides, from the head-yaw history. Body shape is the head yaw during the flight
+    // up to 0.25 s before the touch: eyes off the ball at the touch are not a half-turn.
+    const facing = this.smoothedYaw(m.flight != null ? clamp(m.flight - 0.25, 0.2, 0.5) : 0.5, 0.25);
     m.blindSeen = this.blindSeen(facing);
     const ws = Math.max(this.buildupStart, t - RATE_WINDOW);
     let left = false, right = false;
@@ -777,12 +817,13 @@ export class Rep {
     return m;
   }
 
-  // circular mean of the head yaw over the last `span` seconds
-  smoothedYaw(span) {
-    let sx = 0, cz = 0, acc = 0, i = this._rh;
+  // circular mean of the head yaw over the `span` seconds before now - skip
+  smoothedYaw(span, skip = 0) {
+    let sx = 0, cz = 0, acc = 0, skipped = 0, i = this._rh;
     for (let k = 0; k < this._rn && acc < span; k++) {
       i = (i - 1 + RING) % RING;
       const dt = this._rd[i] || 1e-4;
+      if (skipped < skip) { skipped += dt; continue; }
       sx += Math.sin(this._ry[i]) * dt;
       cz += Math.cos(this._ry[i]) * dt;
       acc += dt;
@@ -844,7 +885,9 @@ export class Rep {
     this._ry[i] = yaw; this._rd[i] = dt; this._rh = (i + 1) % RING;
     if (this._rn < RING) this._rn++;
 
-    if (w.snapTurned) {
+    const snap = !!w.snapTurned;
+    this.snapThisFrame = snap; // scenarios and drills read this: a snap-turn frame never counts as a look
+    if (snap) {
       // the jump in yaw was the controller: drop any scan in progress and start measuring from here
       w.snapTurned = false;
       this.anchorYaw = yaw;
@@ -863,22 +906,36 @@ export class Rep {
           this.scanDwell = dt;
           this.scanSide = Math.sign(Math.sin(yaw - toBall));
           this.scanBall = ball.flight ? (ball.flight.loft ? 'air' : 'ground') : 'held';
+          this.scanSaw = this.lookingAtPlay(yaw, user);
           this.fx.tick?.();
         }
       } else {
         if (off > this.scanPeak) { this.scanPeak = off; this.scanPeakYaw = yaw; this.scanPeakT = t; }
         if (off > WAGGLE) this.scanDwell += dt;
+        if (!this.scanSaw) this.scanSaw = this.lookingAtPlay(yaw, user);
         const cameBack = angDiff(yaw, this.scanPeakYaw) > 40 * DEG && angDiff(yaw, this.anchorYaw) < 25 * DEG;
         if (off < SCAN_OFF || cameBack) { this.closeScan(); this.anchorYaw = yaw; }
       }
     }
     if (this.strikeWatchUntil && t < this.strikeWatchUntil && off < 38 * DEG) this.watchedStrike = true;
 
-    // who was actually looked at (gaze cone, held)
+    // who was actually looked at (gaze cone, held); the frame a snap turn swung the view looks at nobody
+    if (snap) return;
     const ux = user.x, uz = user.z;
     for (let k = 0; k < this.mates.length; k++) this.gaze(this._gm, k, this.sawMate, yaw, this.mates[k].pos, ux, uz, dt);
     for (let k = 0; k < this.pressers.length; k++) this.gaze(this._gp, k, this.sawPresser, yaw, this.pressers[k].pos, ux, uz, dt);
     if (this._freeIdx >= 0) this.lastSawFree = this.sawMate[this._freeIdx];
+  }
+
+  // a scan has to take in the game: a player in view, or open pitch at eye level, not the stands or the sky
+  lookingAtPlay(yaw, user) {
+    const cam = this.world.camera;
+    const dy = cam && cam.getWorldDirection ? cam.getWorldDirection(_dir).y : 0; // no camera (offline tests): level
+    if (dy < -0.57 || dy > 0.42) return false;
+    for (const p of this.home) if (p !== this.userBody && angDiff(yaw, Math.atan2(p.pos.x - user.x, p.pos.z - user.z)) < 25 * DEG) return true;
+    for (const p of this.away) if (angDiff(yaw, Math.atan2(p.pos.x - user.x, p.pos.z - user.z)) < 25 * DEG) return true;
+    const px = user.x + Math.sin(yaw) * 15, pz = user.z + Math.cos(yaw) * 15;
+    return Math.abs(px) < PITCH.HL && Math.abs(pz) < PITCH.HW;
   }
 
   gaze(acc, k, seen, yaw, p, ux, uz, dt) {
@@ -898,6 +955,7 @@ export class Rep {
     this.inScan = false;
     const dur = this.t - this.scanStart;
     if (dur < (atTouch ? MIN_SCAN_AT_TOUCH : MIN_SCAN) || this.scanDwell < (atTouch ? MIN_DWELL * 0.6 : MIN_DWELL)) return;
+    if (!this.scanSaw) return;
     this.scans.push({
       t: this.scanStart, end: this.t, dur, peak: this.scanPeak, peakT: this.scanPeakT, peakYaw: this.scanPeakYaw,
       side: this.scanSide, shoulder: this.scanPeak > 100 * DEG, ball: this.scanBall, ballMoving: this.scanBall !== 'held',
@@ -958,7 +1016,6 @@ export class Rep {
     this.events.push({ t: this.t, type: 'decide' });
     this.logTouch('kick', true);
     this.world.clearOverlays();
-    this.fx.kick?.(1);
 
     let outcome, target;
     if (chosen.kind === 'pass') {
@@ -969,7 +1026,7 @@ export class Rep {
       const vis = speed * this.speed;
       let worst = null, wm = Infinity, nearest = null, nd = Infinity;
       for (const o of this.away) {
-        const m = laneMargin(from, t.pos, o.pos, speed, lofted) + rand(-0.15, 0.15);
+        const m = laneMargin(from, t.pos, o.pos, speed, lofted);
         if (m < wm) { wm = m; worst = o; }
         const dd = Math.hypot(o.pos.x - t.pos.x, o.pos.z - t.pos.z);
         if (dd < nd) { nd = dd; nearest = o; }
@@ -1010,7 +1067,7 @@ export class Rep {
         const blocker = this.away.filter((o) => o.slot !== 'GK').sort((a, b) => a.pos.distanceTo(from) - b.pos.distanceTo(from))[0];
         ball.kick(from, blocker.pos.clone(), sv, 0.4);
         target = blocker;
-      } else if (Math.random() < pGoal) {
+      } else if (pGoal >= 0.4) { // a good chance goes in, a poor one is saved: skill, not dice
         outcome = 'goal';
         ball.kick(from, new THREE.Vector3(GOAL.x + 1.2, 0, aim.z), sv, rand(0.3, 1.4));
         target = null;
@@ -1021,6 +1078,7 @@ export class Rep {
         target = gk;
       }
     }
+    this.kickSound(1, ball.flight?.wait);
     this.outcome = outcome;
     this.outcomeTarget = target;
     this.state = 'outcome';
@@ -1093,9 +1151,11 @@ export class Rep {
     const composite = scanComposite(parts);
     const total = totalScore(decision, sf, composite, quiz ? this.memory : null);
     const out = this.outcome;
-    if (out === 'goal') this.fx.cheer?.(1);
-    else if (out === 'tight') this.fx.cheer?.(0.7); // completing under the press is the trained skill
-    else if (out === 'completed') this.fx.cheer?.(0.4);
+    // the crowd reacts to the quality of the decision, not just the result
+    const q = 0.4 + 0.6 * ((this.decisionScore || 0) / 100);
+    if (out === 'goal') this.fx.cheer?.(q);
+    else if (out === 'tight') this.fx.cheer?.(0.7 * q); // completing under the press is the trained skill
+    else if (out === 'completed') this.fx.cheer?.(0.4 * q);
     else if (out === 'intercepted' || out === 'blocked') this.fx.groan?.();
     const best = this.options?.[0] || null;
     this.result = {

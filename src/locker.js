@@ -19,25 +19,31 @@ import * as THREE from 'three';
  *            mount.add(panel.mesh); panel.mesh.position.set(0, 0, 0.01);   // flush
  *            Panels draw with depthTest off, so hide them when you leave the room.
  *   Pointer: raycast locker.pickables (check locker.visible first). hit.object.userData.action is one of
- *            'continue' (tunnel door), 'practice' (kit bag), 'settings' (clipboard), 'career', 'stats', 'notice'.
+ *            'continue' (tunnel door + the lit sign above it), 'practice' (kit bag + its stand sign), 'settings'
+ *            (clipboard + its plate), 'career', 'stats', 'notice' (each board + its frame + the header plate over it).
+ *            Several pickables share one action; hovering any of them lights all of them.
  *            locker.setHover(hit ? hit.object : null) every frame; the highlight is a warm outline / faint glow.
  *   Frame:   const { doorGaze } = locker.update(dt, headWorldPos, headWorldDir);   // doorGaze 0..1, eased;
  *            the returned object is reused every frame. Drive crowd swell from it.
  *   Data:    locker.setProfile({ name, number, color })   shirt back + nameplate (color = shirt/plate colour)
  *            locker.setTrophies(n)                        0..8 gold, the rest faint outlines
  *            locker.setNextLabel('LESSON 4 · TIMING')     chalk slate above the door
+ *            locker.setDoorLabel('CONTINUE')              the big lit sign above the door (default 'CONTINUE'; 'PLAY'...)
  *
  * LAYOUT. Room 9 m (x) x 7 m (z), ceiling 3.2 m. The player spawns in the middle facing +z (yaw 0), eyes
  * ~1.65 m. Facing +z the left hand is +x:
  *   front  (+z)  career board (left), 3 stalls with the player's lit locker in the middle, noticeboard (right)
  *   left   (+x)  stats TV, trophy cabinet, towel shelf
- *   right  (-x)  tunnel door (CONTINUE) with the clipboard (SETTINGS) beside it, 4 stalls
+ *   right  (-x)  tunnel door under the lit CONTINUE sign, the clipboard (SETTINGS, with its own plate) beside it, 4 stalls
+ *                (the stalls sit 0.15 m toward the corners so the gap beside the door holds a readable plate)
  *   behind (-z)  physio table, first-aid cabinet, clock, 4 stalls
- *   kit bag (PRACTICE) with balls and cones on the floor front-left.
+ *   kit bag (PRACTICE) with balls and cones on the floor front-left, a PRACTICE sign on a stand behind it.
+ * Every target carries a label with letters >= 8 cm (see SIGNS): the door sign 17 cm, header plates CAREER / TODAY /
+ * STATS 18 cm above the boards (the Panels cover the boards, the plates and frames stay visible and pickable).
  * The boards are 4.5-4.7 m from the spawn; a Panel scaled up toward maxWidth reads better in the headset.
  * The career/stats boards are dark on purpose: a smoked-glass Panel stays legible over them.
  *
- * COST. ~25 draw calls, ~17k triangles, 3 real lights (hemisphere, spot on the own locker, door point light),
+ * COST. ~27 draw calls, ~17k triangles, 3 real lights (hemisphere, spot on the own locker, door point light),
  * no shadow maps, Lambert + Basic. The first show() compiles the room's shader variants once.
  */
 
@@ -46,7 +52,7 @@ export const LOCKER_ORIGIN = new THREE.Vector3(0, 0, -200);
 const HX = 4.5, HZ = 3.5, H = 3.2, SW = 1.1;
 const ORANGE = 0xff7a1a, INK = 0x15171a;
 const FONT = '"Barlow Condensed", "Arial Narrow", sans-serif';
-const ATLAS = { w: 1024, h: 512 };
+const ATLAS = { w: 1024, h: 1024 };
 const SHIRT_ATLAS = 1024;
 
 // ---------------------------------------------------------------- small helpers
@@ -484,16 +490,78 @@ function plateText(g, cx, cy, text, size, color) {
   g.fillText(text, cx, cy);
 }
 
-// static decals: exit sign, bag tag, door stencil, wall lettering, clipboard sheet, clock face
+/*
+ * Signs. Every target in the room has a label you can read from where you stand: w x h is the plate in metres,
+ * cap the letter (capital) height in metres. Cap 0.08 m is about 1 degree at 4.5 m, the smallest we call readable.
+ * `ppm` is the texture density in pixels per metre. The door sign is lit (its own mesh, see setDoorLabel).
+ */
+export const SIGNS = {
+  continue: { w: 1.1, h: 0.26, cap: 0.17, ppm: 640, track: 0.05 },    // lit, above the door
+  settings: { w: 0.52, h: 0.17, cap: 0.088, ppm: 640, track: 0.02 },  // above the clipboard, fills the gap beside the door
+  practice: { w: 0.66, h: 0.2, cap: 0.1, ppm: 640, track: 0.04 },     // on a floor stand behind the kit bag
+  career: { w: 1.1, h: 0.3, cap: 0.18, ppm: 400, track: 0.04 },       // header plates over the wall boards
+  today: { w: 1.1, h: 0.3, cap: 0.18, ppm: 400, track: 0.04 },
+  stats: { w: 1.1, h: 0.3, cap: 0.18, ppm: 400, track: 0.04 },
+};
+export const SIGN_TEXT = { settings: 'SETTINGS', practice: 'PRACTICE', career: 'CAREER', today: 'TODAY', stats: 'STATS' };
+// advance widths in em of the label texts in Barlow Condensed 800 (measured), used to predict the letter size that survives fitting
+const TEXT_EM = { SETTINGS: 3.548, PRACTICE: 3.545, CONTINUE: 3.631, PLAY: 1.856, 'CAREER COMPLETE': 6.795, CAREER: 2.81, TODAY: 2.347, STATS: 2.261 };
+const SIGN_MARGIN = 0.04;   // metres, total, left over on a plate
+
+/** Cap height in metres the letters of `text` end up with on plate `key` (shrunk from the spec only if the text will not fit). */
+export function signCapHeight(key, text = SIGN_TEXT[key] || 'CONTINUE') {
+  const sp = SIGNS[key];
+  const em = (TEXT_EM[text] ?? 0.45 * text.length) + sp.track * text.length;
+  const emM = sp.cap / 0.7;
+  const fit = (sp.w - SIGN_MARGIN) / (em * emM);
+  return sp.cap * Math.min(1, fit);
+}
+
+// static decals: exit sign, bag tag, wall lettering, clipboard sheet, clock face, and the sign plates (y >= 512)
 const AT = {
   exit: [0, 0, 256, 96],
   tag: [256, 0, 192, 96],
-  tunnel: [448, 0, 256, 96],
   heads: [0, 100, 1024, 128],
   sheet: [0, 232, 192, 256],
   clock: [200, 232, 160, 160],
-  white: [1000, 496, 16, 16],
+  white: [1000, 1008, 16, 16],   // bottom-right corner: Batch's 'white' uv (0.99, 0.01) lands in this cell
+  settings: [0, 512, Math.round(SIGNS.settings.w * SIGNS.settings.ppm), Math.round(SIGNS.settings.h * SIGNS.settings.ppm)],
+  practice: [330, 512, Math.round(SIGNS.practice.w * SIGNS.practice.ppm), Math.round(SIGNS.practice.h * SIGNS.practice.ppm)],
+  career: [0, 660, Math.round(SIGNS.career.w * SIGNS.career.ppm), Math.round(SIGNS.career.h * SIGNS.career.ppm)],
+  today: [450, 660, Math.round(SIGNS.today.w * SIGNS.today.ppm), Math.round(SIGNS.today.h * SIGNS.today.ppm)],
+  stats: [0, 790, Math.round(SIGNS.stats.w * SIGNS.stats.ppm), Math.round(SIGNS.stats.h * SIGNS.stats.ppm)],
 };
+
+/** One sign plate drawn into rect r of canvas context g: dark plate, warm-white letters (or a lit orange face with dark ink). */
+function drawPlate(g, r, sp, text, lit = false) {
+  const [x, y, w, h] = r;
+  const lw = Math.max(2, h * 0.035);
+  g.save();
+  g.beginPath(); g.rect(x, y, w, h); g.clip();
+  g.fillStyle = lit ? '#ff7a1a' : '#1b1a18';
+  g.fillRect(x, y, w, h);
+  g.strokeStyle = lit ? 'rgba(21,23,26,0.45)' : 'rgba(242,240,232,0.18)';
+  g.lineWidth = lw;
+  g.strokeRect(x + lw * 1.5, y + lw * 1.5, w - lw * 3, h - lw * 3);
+  if (!lit) { g.fillStyle = '#ff7a1a'; g.fillRect(x, y + h - h * 0.06, w, h * 0.06); }
+  // letters: cap height from the spec, shrunk only if the text would not fit the plate
+  let size = Math.round((sp.cap * sp.ppm) / 0.7);
+  const maxW = w - SIGN_MARGIN * sp.ppm;
+  const spaced = 'letterSpacing' in g;
+  g.font = `800 ${size}px ${FONT}`;
+  if (spaced) g.letterSpacing = `${(size * sp.track).toFixed(1)}px`;
+  const tw = g.measureText(text).width;
+  if (tw > maxW) {
+    size = Math.floor((size * maxW) / tw);
+    g.font = `800 ${size}px ${FONT}`;
+    if (spaced) g.letterSpacing = `${(size * sp.track).toFixed(1)}px`;
+  }
+  g.fillStyle = lit ? '#15171a' : '#f2f0e8';
+  g.textAlign = 'center'; g.textBaseline = 'alphabetic';
+  g.fillText(text, x + w / 2, y + h / 2 + (size * 0.7) / 2 - (lit ? 0 : h * 0.02));
+  if (spaced) g.letterSpacing = '0px';
+  g.restore();
+}
 function atlasRect(r) {
   const [x, y, w, h] = r;
   return [(x + 0.5) / ATLAS.w, 1 - (y + h - 0.5) / ATLAS.h, (x + w - 0.5) / ATLAS.w, 1 - (y + 0.5) / ATLAS.h];
@@ -520,14 +588,6 @@ function decoCanvas() {
   g.fillStyle = '#6a5f4c'; g.beginPath(); g.arc(x + 24, y + h / 2, 6, 0, 6.2832); g.fill();
   g.fillStyle = '#15171a'; g.textAlign = 'center'; g.textBaseline = 'middle';
   g.font = `800 40px ${FONT}`; g.fillText('PRACTICE', x + 112, y + h / 2 + 2);
-  // door stencil
-  [x, y, w, h] = AT.tunnel;
-  g.clearRect(x, y, w, h);
-  g.fillStyle = 'rgba(240,236,224,0.88)'; g.textAlign = 'center'; g.textBaseline = 'middle';
-  g.font = `800 66px ${FONT}`;
-  if ('letterSpacing' in g) g.letterSpacing = '8px';
-  g.fillText('TUNNEL', x + w / 2, y + h / 2);
-  if ('letterSpacing' in g) g.letterSpacing = '0px';
   // wall lettering
   [x, y, w, h] = AT.heads;
   g.clearRect(x, y, w, h);
@@ -547,6 +607,8 @@ function decoCanvas() {
     g.fillRect(x + 14, y + 118 + r * 20, 18, 12);
     g.fillRect(x + 42, y + 121 + r * 20, 100 - (r % 3) * 20, 5);
   }
+  // sign plates
+  for (const key of Object.keys(SIGN_TEXT)) drawPlate(g, AT[key], SIGNS[key], SIGN_TEXT[key]);
   // clock
   [x, y, w, h] = AT.clock;
   g.fillStyle = '#ebe5d6'; g.beginPath(); g.arc(x + 80, y + 80, 76, 0, 6.2832); g.fill();
@@ -748,6 +810,7 @@ export class LockerRoom {
     this.profile = { name: 'PLAYER', number: 8, color: new THREE.Color(ORANGE) };
     this.trophies = 0;
     this.nextLabel = 'MATCH DAY';
+    this.doorLabel = 'CONTINUE';
     this.doorGaze = 0;
     this._out = { doorGaze: 0 };
     this._hover = null;
@@ -762,6 +825,7 @@ export class LockerRoom {
     this.setProfile({});
     this.setTrophies(0);
     this.setNextLabel(this.nextLabel);
+    this._paintDoorSign();
     this.group.updateMatrixWorld(true);
     this._doorWorld.copy(this._doorLocal).applyMatrix4(this.group.matrixWorld);
 
@@ -826,6 +890,12 @@ export class LockerRoom {
     this._paintChalk();
   }
 
+  /** The big lit sign above the tunnel door: 'CONTINUE', 'PLAY'... (upper-cased, at most 16 characters). */
+  setDoorLabel(text) {
+    this.doorLabel = String(text || '').toUpperCase().slice(0, 16) || 'CONTINUE';
+    this._paintDoorSign();
+  }
+
   /** Call every frame. headPos/headDir are world-space (dir is the unit forward vector). */
   update(dt, headPos, headDir) {
     this._t += dt;
@@ -839,10 +909,12 @@ export class LockerRoom {
     this._out.doorGaze = this.doorGaze;
 
     // hover easing
+    // pickables that share the hovered one's action light up together (door leaf + sign, board + header + frame)
     let doorHover = 0;
+    const hoverAction = this._hover ? this._hover.userData.action : null;
     for (const p of this.pickables) {
       const u = p.userData;
-      const goal = p === this._hover ? 1 : 0;
+      const goal = hoverAction && u.action === hoverAction ? 1 : 0;
       u.h += (goal - u.h) * Math.min(1, dt * 12);
       if (u.h < 0.002 && goal === 0) u.h = 0;
       if (u.glowMat) u.glowMat.emissive.copy(this._glow).multiplyScalar(u.h * u.glowK);
@@ -851,7 +923,7 @@ export class LockerRoom {
         u.outline.material.opacity = u.h * 0.7;
       }
       if (u.pop) u.pop.scale.setScalar(1 + 0.035 * u.h);
-      if (u.action === 'continue') doorHover = u.h;
+      if (u.action === 'continue') doorHover = Math.max(doorHover, u.h);
     }
 
     // strip light: one fixture flickers now and then
@@ -874,6 +946,9 @@ export class LockerRoom {
     this._bloom.material.opacity = clamp(0.42 * glow + 0.3 * this.doorGaze, 0, 0.85);
     this._spill.material.opacity = clamp(0.5 * glow + 0.3 * this.doorGaze, 0, 0.95);
     this._doorLight.intensity = 3.4 * glow;
+    // the lit sign breathes with the door and swells when you look at it or point at it
+    this._doorSign.material.color.setScalar(clamp(0.93 + 0.03 * Math.sin(t * 2.1) + 0.05 * this.doorGaze + 0.05 * doorHover, 0.7, 1));
+    this._signHalo.material.opacity = clamp(0.22 + 0.02 * Math.sin(t * 2.1) + 0.25 * this.doorGaze + 0.3 * doorHover, 0, 0.7);
     return this._out;
   }
 
@@ -926,6 +1001,14 @@ export class LockerRoom {
     g.fillText(P.name, 250 + (W - 250) / 2, Hh / 2 + 8);
     if ('letterSpacing' in g) g.letterSpacing = '0px';
     this._plateTex.needsUpdate = true;
+  }
+
+  _paintDoorSign() {
+    const sp = SIGNS.continue, g = this._signCtx;
+    if (!g) return;
+    g.clearRect(0, 0, this._signCv.width, this._signCv.height);
+    drawPlate(g, [0, 0, this._signCv.width, this._signCv.height], sp, this.doorLabel, true);
+    this._signTex.needsUpdate = true;
   }
 
   _paintChalk() {
@@ -1010,6 +1093,23 @@ export class LockerRoom {
     const setFrame = (m) => { for (const b of all) b.frame.copy(m); };
     const WHITE = new THREE.Color(1, 1, 1);
     const R = (k) => atlasRect(AT[k]);
+    // a label plate on a wall: dark backing, the atlas face, an invisible pick plane and a hover outline
+    const hitMat = new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide });
+    this._hitMat = hitMat;
+    const SIGN_ACTION = { settings: 'settings', career: 'career', today: 'notice', stats: 'stats' };
+    const signPlate = (key, wall, u, y) => {
+      const sp = SIGNS[key];
+      setFrame(wallMatrix(wall, u));
+      solid.box(0, y, 0.03, sp.w + 0.03, sp.h + 0.03, 0.03, 0x161513);
+      deco.quad(0, y, 0.047, sp.w, sp.h, WHITE, R(key));
+      const hit = new THREE.Mesh(new THREE.PlaneGeometry(sp.w + 0.12, sp.h + 0.12), hitMat);
+      placeOnWall(hit, wall, u, y, 0.07);
+      group.add(hit);
+      const ol = this._outlineFor(sp.w, sp.h, 0.02);
+      placeOnWall(ol, wall, u, y, 0.052);
+      group.add(ol);
+      this._pickable(hit, SIGN_ACTION[key], { outline: ol });
+    };
 
     // ---- shell
     const up = new THREE.Vector3(0, H, 0);
@@ -1054,8 +1154,8 @@ export class LockerRoom {
     const stalls = [];
     const bankDefs = [
       { wall: 'front', us: [-1.1, 0, 1.1] },
-      { wall: 'right', us: [-2.7, -1.6] },
-      { wall: 'right', us: [1.6, 2.7] },
+      { wall: 'right', us: [-2.85, -1.75] },   // 0.15 m toward the corners: room for a readable sign beside the door
+      { wall: 'right', us: [1.75, 2.85] },
       { wall: 'back', us: [-3.3, -2.2] },
       { wall: 'back', us: [2.2, 3.3] },
     ];
@@ -1200,6 +1300,9 @@ export class LockerRoom {
       wood.box(sw / 2 + 0.03, yc, 0.025, 0.06, sh, 0.05, fr, { swap: true });
       solid.box(0, yc, 0.01, sw, sh, 0.02, 0x7a5434);
     }
+    // header plates over the boards: the panels cover the boards, these stay readable and pickable
+    signPlate('career', 'front', careerU, 2.66);
+    signPlate('today', 'front', noticeU, 2.4);
     setFrame(new THREE.Matrix4());
 
     // ---- left wall: TV + bench, trophy cabinet, towel shelf
@@ -1207,6 +1310,8 @@ export class LockerRoom {
       setFrame(wallMatrix('left', 0));
       const yc = 1.7;
       solid.box(0, yc, 0.025, 1.9, 1.1, 0.05, 0x16171a);
+      signPlate('stats', 'left', 0, 2.42);
+      setFrame(wallMatrix('left', 0));
       // low bench under the TV, along the wall
       setFrame(wallMatrix('left', 0.4));
       wood.box(0, 0.44, 0.3, 2.6, 0.05, 0.38, WOOD_LIGHT);
@@ -1261,29 +1366,32 @@ export class LockerRoom {
       });
     }
 
-    // ---- right wall: door frame, hook for the clipboard
+    // ---- right wall: door frame, sign housing above the door, hook for the clipboard
+    const gapU = -0.885;   // middle of the gap between the door frame and the nearest stall
     {
       setFrame(wallMatrix('right', 0));
       const fc = 0x24221f;
       solid.box(-0.54, 1.1, 0.05, 0.1, 2.2, 0.1, fc);
       solid.box(0.54, 1.1, 0.05, 0.1, 2.2, 0.1, fc);
       solid.box(0, 2.2, 0.05, 1.18, 0.1, 0.1, fc);
-      // kick plate, push bar, stencil
+      // kick plate and push bar
       solid.box(0, 0.12, 0.092, 0.95, 0.24, 0.012, 0x6d6e6a);
       solid.box(0, 1.05, 0.11, 0.7, 0.04, 0.03, METAL);
       for (const bx of [-0.3, 0.3]) solid.box(bx, 1.05, 0.092, 0.03, 0.04, 0.03, METAL);
-      deco.quad(0, 0.66, 0.091, 0.7, 0.26, WHITE, R('tunnel'));
       // hazard-free orange stripe at the threshold
       solid.box(0, 0.005, 0.1, 1.18, 0.01, 0.2, 0x2a2724, { noBake: true });
-      // exit sign + chalk slate fixture
-      solid.box(0, 2.405, 0.07, 0.56, 0.22, 0.1, 0x2a2926);
-      lamps.quad(0, 2.405, 0.122, 0.5, 0.19, WHITE, R('exit'), { noBake: true });
-      // clipboard hook
-      setFrame(wallMatrix('right', -0.86));
-      solid.cyl(0, 1.7, 0.03, 0.012, 0.012, 0.06, METAL, { rx: Math.PI / 2, seg: 6 });
-      solid.box(0, 1.675, 0.05, 0.03, 0.05, 0.02, METAL);
+      // housing for the lit door sign (the sign face itself is a separate mesh, see _door)
+      solid.box(0, 2.41, 0.06, SIGNS.continue.w + 0.06, SIGNS.continue.h + 0.03, 0.1, 0x1b1a18);
+      // small exit sign on the other side of the door
+      setFrame(wallMatrix('right', -gapU));
+      solid.box(0, 1.95, 0.045, 0.34, 0.14, 0.05, 0x2a2926);
+      lamps.quad(0, 1.95, 0.073, 0.3, 0.1125, WHITE, R('exit'), { noBake: true });
+      // clipboard hook, and the SETTINGS plate above it (the gap between the door frame and the first stall is ~0.59 m)
+      setFrame(wallMatrix('right', gapU));
+      solid.cyl(0, 1.72, 0.03, 0.012, 0.012, 0.06, METAL, { rx: Math.PI / 2, seg: 6 });
+      solid.box(0, 1.695, 0.05, 0.03, 0.05, 0.02, METAL);
+      signPlate('settings', 'right', gapU, 1.93);
     }
-
     // ---- back wall: physio table, first aid, clock
     {
       setFrame(wallMatrix('back', 0));
@@ -1334,11 +1442,32 @@ export class LockerRoom {
     bag.rotation.y = 0.7;
     group.add(bag);
     {
-      // invisible padded hit proxy
-      const hit = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.5, 0.6), new THREE.MeshBasicMaterial({ visible: false }));
-      hit.position.set(0, 0.25, 0);
+      // invisible padded hit proxy: the whole bag with a generous margin (it is a floor-level target)
+      const hit = new THREE.Mesh(new THREE.BoxGeometry(1.35, 0.8, 0.95), hitMat);
+      hit.position.set(0, 0.35, 0);
       bag.add(hit);
       this._pickable(hit, 'practice', { glowMat: bagMat, k: 0.035, pop: bag });
+    }
+    // PRACTICE on a floor stand behind the bag, facing the spawn
+    {
+      const sp = SIGNS.practice;
+      const px = 2.0, pz = 1.85, py = 0.8;    // behind the bag, low enough not to cover the career board's bottom row
+      const face = Math.atan2(-px, -pz);          // +z of the stand frame points at the spawn
+      setFrame(new THREE.Matrix4().makeRotationY(face).setPosition(px, 0, pz));
+      solid.cyl(0, 0.02, 0, 0.2, 0.22, 0.04, 0x2a2926, { seg: 14, noBake: false });
+      solid.cyl(0, 0.46, 0, 0.014, 0.014, 0.92, METAL, { seg: 8 });
+      solid.box(0, py, 0, sp.w + 0.03, sp.h + 0.03, 0.03, 0x161513);
+      deco.quad(0, py, 0.017, sp.w, sp.h, WHITE, R('practice'));
+      deco.quad(0, py, -0.017, sp.w, sp.h, WHITE, R('practice'), { ry: Math.PI });
+      const hit = new THREE.Mesh(new THREE.BoxGeometry(sp.w + 0.14, sp.h + 0.14, 0.16), hitMat);
+      hit.position.set(px, py, pz);
+      hit.rotation.y = face;
+      group.add(hit);
+      const ol = this._outlineFor(sp.w, sp.h, 0.02);
+      ol.position.set(px, py, pz); ol.rotation.y = face;
+      ol.translateZ(0.02);
+      group.add(ol);
+      this._pickable(hit, 'practice', { outline: ol });
     }
     // balls and cones next to it
     setFrame(new THREE.Matrix4());
@@ -1365,15 +1494,17 @@ export class LockerRoom {
     clip.name = 'clipboard';
     {
       const w = WALLS.right;
-      clip.position.set(w.o[0] + w.t[0] * -0.86 + w.n[0] * 0.075, 1.52, w.o[2] + w.t[2] * -0.86 + w.n[2] * 0.075);
+      clip.position.set(w.o[0] + w.t[0] * gapU + w.n[0] * 0.08, 1.49, w.o[2] + w.t[2] * gapU + w.n[2] * 0.08);
       clip.rotation.y = w.yaw;
       clip.rotation.z = 0.03;
+      clip.scale.setScalar(1.3);
     }
     group.add(clip);
     {
-      const hit = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.5, 0.2), new THREE.MeshBasicMaterial({ visible: false }));
-      hit.position.set(0, 0, 0.05);
-      clip.add(hit);
+      // pick volume: clipboard and its plate, the full width of the gap beside the door
+      const hit = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.9, 0.24), hitMat);
+      placeOnWall(hit, 'right', gapU, 1.6, 0.12);
+      group.add(hit);
       const ol = this._outlineFor(0.25, 0.34, 0.02);
       ol.position.z = 0.01;
       clip.add(ol);
@@ -1461,6 +1592,11 @@ export class LockerRoom {
       outline.position.z = frontZ + 0.006 - off;
       holder.add(outline);
       this._pickable(surf, action, { outline });
+      // the frame and a margin around the board are pickable too (the lead's Panel covers the surface itself)
+      const fh = new THREE.Mesh(new THREE.PlaneGeometry(pickW + 2 * frameW + 0.06, pickH + 2 * frameW + 0.06), this._hitMat);
+      fh.position.z = frontZ + 0.012 - off;
+      holder.add(fh);
+      this._pickable(fh, action);
       holder.userData.surface = surf;
       this.mounts[name] = holder;
       return holder;
@@ -1524,6 +1660,33 @@ export class LockerRoom {
     this._spill.position.set(0, 0.018, 2.15);
     this._spill.renderOrder = 3;
     root.add(this._spill);
+
+    // lit sign above the door: orange face, dark letters, its own canvas so setDoorLabel is a cheap repaint
+    {
+      const sp = SIGNS.continue, y = 2.41;
+      const signCv = cv(Math.round(sp.w * sp.ppm), Math.round(sp.h * sp.ppm));
+      this._signCv = signCv;
+      this._signCtx = signCv.getContext('2d');
+      this._signTex = texOf(signCv, { aniso: 4 });
+      this._doorSign = new THREE.Mesh(new THREE.PlaneGeometry(sp.w, sp.h), new THREE.MeshBasicMaterial({ map: this._signTex }));
+      this._doorSign.name = 'doorSign';
+      this._doorSign.position.set(0, y, 0.112);
+      root.add(this._doorSign);
+      this._signHalo = new THREE.Mesh(new THREE.PlaneGeometry(2.6, 1.1), new THREE.MeshBasicMaterial({
+        map: texOf(bloomCanvas(), { aniso: 1 }), color: ORANGE, transparent: true, opacity: 0.3, blending: THREE.AdditiveBlending, depthWrite: false,
+      }));
+      this._signHalo.position.set(0, y, 0.125);
+      this._signHalo.renderOrder = 3;
+      root.add(this._signHalo);
+      const hit = new THREE.Mesh(new THREE.PlaneGeometry(sp.w + 0.2, sp.h + 0.14), this._hitMat);
+      hit.position.set(0, y, 0.14);
+      root.add(hit);
+      const ol = this._outlineFor(sp.w, sp.h, 0.025);
+      ol.position.set(0, y, 0.118);
+      root.add(ol);
+      this._pickable(hit, 'continue', { outline: ol });
+      this._painters.push(() => this._paintDoorSign());
+    }
 
     this._doorLocal = new THREE.Vector3(-HX + 0.1, 1.2, 0);
   }

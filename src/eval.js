@@ -93,13 +93,24 @@ export const GAIN_FLOOR = 0.06; // a safe recycle is never worth nothing
 export const SWITCH_DZ = 25, SWITCH_BONUS = 0.2;
 export const SHOT_SCALE = 2.6;
 
-// Scores every pass (and the shot, if in range) from the ball's position: value = pComplete x gain.
+// What losing the ball costs, by where the pass is played from (the home side attacks +x): 0.5 near your
+// own box (a turnover there is a shot on goal), 0.15 in the attacking third (you can win it back there).
+export const LOSS_OWN = 0.5, LOSS_ATT = 0.15, LOSS_X_OWN = -36, LOSS_X_ATT = 17.5;
+export function turnoverLoss(x) {
+  const k = clamp((x - LOSS_X_OWN) / (LOSS_X_ATT - LOSS_X_OWN), 0, 1);
+  return LOSS_OWN + (LOSS_ATT - LOSS_OWN) * k;
+}
+
+// Scores every pass (and the shot, if in range) from the ball's position:
+// value = pComplete x gain - (1 - pComplete) x turnoverLoss(ball.x), so a 49% forward ball from your own
+// box is a loss against a 99% safe pass; the value goes negative when a pass costs more than it gains.
 // opts.keeper: the viewer is the goalkeeper. A receiver with a presser on him is punished, and a long
 // ball into a duel is a coin flip, not a good pass. opts.shots: allow the shot option for any group.
 export function evaluateOptions(ball, mates, opps, group, opts = {}) {
   const keeper = !!opts.keeper;
   const w = keeper ? KEEPER_GAIN : GAIN[group] || GAIN.mid;
   const outfieldOpps = opps.filter((o) => o.slot !== 'GK');
+  const loss = turnoverLoss(ball.x);
   const out = [];
   for (const t of mates) {
     const dist = Math.hypot(t.pos.x - ball.x, t.pos.z - ball.z);
@@ -123,7 +134,7 @@ export function evaluateOptions(ball, mates, opps, group, opts = {}) {
     const isSwitch = Math.abs(dz) >= SWITCH_DZ && space >= 0.5;
     const gain = Math.max(GAIN_FLOOR, w.base + w.prog * prog + w.lines * lines + w.space * space + (isSwitch ? SWITCH_BONUS : 0));
     out.push({
-      kind: 'pass', target: t, value: pComplete * gain, pComplete, gain, safe: pComplete, space, prog, lines, broken,
+      kind: 'pass', target: t, value: pComplete * gain - (1 - pComplete) * loss, pComplete, gain, loss, safe: pComplete, space, prog, lines, broken,
       margin: m, threat: who, lofted, speed, switch: isSwitch, near, dx, dz,
     });
   }
@@ -141,14 +152,17 @@ export function evaluateOptions(ball, mates, opps, group, opts = {}) {
   return out;
 }
 
-// Rank-based: the best option scores 100, others by value against it. When every option is poor
-// (values near zero make ratios noisy) the option's rank holds the score up.
+// The best option scores 100, others by value against it. When every option is poor (values near zero make
+// ratios noisy) the option's rank holds the score up. Values can be negative (a pass that costs more than
+// it gains): a net-negative choice scores 0, and when even the best option is net-negative the choices
+// are graded by how far they sit below it (0 at 0.4 below).
 export function scoreDecision(chosen, options) {
   if (!chosen || !options.length) return 0;
-  const best = Math.max(options[0].value, 1e-6);
-  const ratio = clamp(chosen.value / best, 0, 1);
+  const best = options[0].value;
   const rank = options.indexOf(chosen);
-  if (rank < 0 || best >= 0.1 || options.length < 2) return Math.round(ratio * 100);
+  if (best <= 0) return Math.round(clamp(1 - (best - (rank < 0 ? best - 0.2 : chosen.value)) / 0.4, 0, 1) * 100);
+  const ratio = clamp(chosen.value / best, 0, 1);
+  if (rank < 0 || best >= 0.1 || options.length < 2 || chosen.value <= 0) return Math.round(ratio * 100);
   const byRank = 1 - rank / (options.length - 1);
   return Math.round(Math.max(ratio, byRank * 0.7) * 100);
 }

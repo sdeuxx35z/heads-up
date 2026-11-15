@@ -30,7 +30,7 @@ function profileChips(k, app) {
     g.fillStyle = on ? p.color : hov ? GLASS.chipHi : GLASS.chip; g.fill();
     g.strokeStyle = on ? 'rgba(255,255,255,0.5)' : hov ? p.color : 'rgba(255,255,255,0.22)'; g.lineWidth = hov && !on ? 3 : 1.5; g.stroke();
     k.text(String(i + 1), x, y + 23, 30, { align: 'center', base: 'middle', color: on ? '#111' : GLASS.dim });
-    k.hit('prof' + i, x - 28, y - 6, 56, 56, () => { store.setActive(i); app.redraw(); });
+    k.hit('prof' + i, x - 28, y - 6, 56, 56, () => app.switchProfile(i));
   });
 }
 
@@ -78,7 +78,7 @@ export function today(app) {
     const d = dailyDrill(p), done = p.dailies.includes(d.key), st = streak(p);
     k.text('TODAY', 56, 100, 72, { weight: 800 });
     k.text(st ? `${st} DAY STREAK` : d.key, k.w - 56, 100, 34, { align: 'right', color: GLASS.dim });
-    const names = d.drills.map((x, i) => `${DRILL_NAMES[x] || x} · ${d.roles[i]}`);
+    const names = d.pairs.map(([x, role]) => `${DRILL_NAMES[x] || x} · ${role}`);
     names.forEach((n, i) => {
       k.card(56, 140 + i * 96, k.w - 112, 80, 20);
       k.text(n, 84, 192 + i * 96, 36);
@@ -121,11 +121,11 @@ export function career(app, mounted = false) {
       k.text(l.name, x + 26, y + 124, 40, { color: ink });
       const [key, need] = l.objective;
       const tag = OBJECTIVE_LABEL[key](need);
-      k.g.font = `700 26px ${UI.font}`;
+      k.g.font = `700 30px ${UI.font}`;
       const tw = Math.min(cw - 52, k.g.measureText(tag).width + 34);
       k.g.fillStyle = open ? GLASS.chip : GLASS.chipOff; k.rr(x + 26, y + 150, tw, 42, 21); k.g.fill();
       edge(k.g, x + 26, y + 150, tw, 42, 21, open ? 0.2 : 0.08, 0.05);
-      k.text(tag, x + 43, y + 172, 26, { color: open ? UI.text : 'rgba(242,240,232,0.25)', base: 'middle' });
+      k.text(tag, x + 43, y + 172, 30, { color: open ? UI.text : 'rgba(242,240,232,0.25)', base: 'middle' });
       const best = p.best[l.index];
       if (best) k.text(`BEST ${best}`, x + 26, y + 220, 26, { color: GLASS.dim });
       if (open) k.hit(id, x, y, cw, ch, () => app.startCareer(l.index));
@@ -153,8 +153,10 @@ export function practice(app) {
     const open = unlockedDrills(store.profile);
     if (!open.has(p.drill)) p.drill = 'match';
     const isOpen = (d) => open.has(d);
+    const opener = (d) => CAREER.findIndex((l) => l.drill === d || (l.pairs || []).some(([x]) => x === d));
+    const label = (d) => (isOpen(d) ? DRILL_NAMES[d] : opener(d) >= 0 ? `LESSON ${opener(d) + 1}` : DRILL_NAMES[d]);
     const per = Math.ceil(DRILL_KEYS.length / 3);
-    for (let i = 0; i < 3; i++) row(DRILL_KEYS.slice(i * per, (i + 1) * per), 'x', 132 + i * 72, 62, p.drill, (v) => (p.drill = v), 25, isOpen, (d) => DRILL_NAMES[d]);
+    for (let i = 0; i < 3; i++) row(DRILL_KEYS.slice(i * per, (i + 1) * per), 'x', 132 + i * 72, 62, p.drill, (v) => (p.drill = v), 25, isOpen, label);
     row(ROLE_KEYS, 'r', 362, 70, p.role, (v) => (p.role = v), 30);
     row(DIFF_KEYS, 'd', 444, 70, p.difficulty, (v) => (p.difficulty = v));
     if (p.drill === 'match') row(['QUIZ OFF', 'QUIZ SOME', 'QUIZ EVERY REP'], 'q', 526, 70, p.quiz, (v) => (p.quiz = v));
@@ -186,7 +188,7 @@ export function stats(app, mounted = false) {
       const x = 70 + i * (tw + 14);
       k.card(x, 160, tw, 150, 22);
       k.text(val, x + 22, 250, 60, { weight: 800 });
-      k.text(label, x + 22, 290, 24, { color: GLASS.dim, weight: 700 });
+      k.text(label, x + 22, 292, 28, { color: GLASS.dim, weight: 700 });
     });
     // last 20 sessions: overall score and scanning against par
     const ss = p.sessions.slice(-20);
@@ -293,15 +295,17 @@ export function repCard(app, r, index, count) {
     const decisionText = r.outcome === 'lost' ? 'TOO LATE'
       : r.decision >= 99 ? `#${chosenNo}${r.reason ? ' · ' + r.reason : ''}`
       : `YOU #${chosenNo ?? '—'} · BEST #${bestNo ?? '—'}${r.reason ? ' · ' + r.reason : ''}`;
+    const taught = app.taught();
     const rows = [
       ['SCANS', rate == null ? '—' : `${rate.toFixed(1)} PER 10 S · PAR ${r.par}`, ratePct == null ? null : Math.min(100, ratePct)],
-      ['TIMING', r.timing == null ? '—' : `${r.badScans || 0} AT A TOUCH`, r.timing],
-      ['CRITICAL', r.critical == null ? 'SHORT PASS' : CRIT[r.critical]?.[0] || '—', r.critical == null ? null : { prime: 100, critical: 80, none: 20, late: 0 }[r.critical]],
-      ['BODY', r.body || '—', r.body ? { 'HALF-TURN': 100, OPEN: 70, CLOSED: 30 }[r.body] : null],
+      taught.has('timing') && ['TIMING', r.timing == null ? '—' : `${r.badScans || 0} AT A TOUCH`, r.timing],
+      taught.has('critical') && ['CRITICAL', r.critical == null ? 'SHORT PASS' : CRIT[r.critical]?.[0] || '—', r.critical == null ? null : { prime: 100, critical: 80, none: 20, late: 0 }[r.critical]],
+      taught.has('info') && ['WHAT YOU SAW', r.sawPresser === false ? 'PRESSER MISSED' : r.sawBest === false ? `#${r.bestNumber} MISSED` : '', r.info],
+      taught.has('body') && ['BODY', r.body || '—', r.body ? { 'HALF-TURN': 100, OPEN: 70, CLOSED: 30 }[r.body] : null],
       ['DECISION', decisionText, r.decision],
-    ];
+    ].filter(Boolean);
     if (r.memory != null) rows.push(['MEMORY', '', r.memory]);
-    const rh = rows.length > 5 ? 62 : 70;
+    const rh = rows.length > 5 ? 62 : rows.length > 3 ? 70 : 84;
     rows.forEach(([name, detail, score], i) => {
       const y = 128 + i * rh;
       k.text(name, 400, y + 46, 38);
@@ -343,7 +347,8 @@ export function summary(app, s, starsEarned, nextLevel) {
     if (lesson && s.objective?.passed) stars(k, starsEarned || 1, 110, 360, 28, 70);
     let cy = 410;
     if (s.newBest || s.firstPass) {
-      const t = s.firstPass ? (nextLevel != null ? `LESSON ${nextLevel + 1} UNLOCKED` : 'CAREER COMPLETE') : 'NEW BEST';
+      const extra = [...(s.unlocked || []).map((d) => DRILL_NAMES[d]), s.trophy ? 'TROPHY' : null].filter(Boolean);
+      const t = (s.firstPass ? (nextLevel != null ? `LESSON ${nextLevel + 1} OPEN` : 'CAREER COMPLETE') : 'NEW BEST') + (extra.length ? ` · ${extra.join(' · ')}` : '');
       k.g.font = `800 32px ${UI.font}`;
       const w = k.g.measureText(t).width + 44;
       k.g.fillStyle = UI.accent; k.rr(70, cy, w, 58, 29); k.g.fill();
@@ -355,7 +360,13 @@ export function summary(app, s, starsEarned, nextLevel) {
       k.card(70, cy, 520, 120, 24);
       k.text(OBJECTIVE_LABEL[o.key](o.need), 98, cy + 50, 34);
       k.text(o.passed ? `YOURS ${formatMetric(o.key, o.got)}` : `YOURS ${formatMetric(o.key, o.got)} · NOT YET`, 98, cy + 96, 32, { color: o.passed ? UI.good : UI.bad, weight: 700 });
+      cy += 132;
+      if (!o.passed && o.lowScans) k.text('SCANS UNDER 30% OF PAR', 70, cy + 20, 30, { color: UI.text });
+      else if (!o.passed && s.worst) k.text(`REP ${s.worst.rep}: ${s.worst.why}`, 70, cy + 20, 30, { color: UI.text });
     }
+    const delta = s.ratingBefore != null && s.ratingAfter != null ? s.ratingAfter - s.ratingBefore : null;
+    const line = [s.streak ? `STREAK ${s.streak}` : null, s.ratingAfter != null ? `RATING ${s.ratingAfter}${delta ? (delta > 0 ? ` +${delta}` : ` ${delta}`) : ''}` : null].filter(Boolean).join(' · ');
+    if (line) k.text(line, 70, 640, 30, { color: GLASS.dim });
     const m = s.metrics || {};
     const rows = [
       ['SCANS VS PAR', formatMetric('rate', m.rate)],
@@ -372,6 +383,8 @@ export function summary(app, s, starsEarned, nextLevel) {
     });
     k.button('menu', 70, 676, 260, 96, 'MENU', { size: 42, onClick: () => app.go('home') });
     k.button('again', 350, 676, 300, 96, o && !o.passed ? 'RETRY' : 'AGAIN', { size: 42, primary: !!o && !o.passed, onClick: () => app.again() });
+    // three misses: the lesson can be skipped (no stars) so nobody hits a wall
+    if (o && !o.passed && s.fails >= 3 && s.level < CAREER.length - 1) k.button('skip', 670, 676, k.w - 740, 96, `SKIP TO LESSON ${s.level + 2}`, { size: 38, onClick: () => { store.skipLesson(s.level); app.startCareer(s.level + 1); } });
     if (nextLevel != null) k.button('nextlvl', 670, 676, k.w - 740, 96, `LESSON ${nextLevel + 1}`, { primary: true, size: 42, onClick: () => app.startCareer(nextLevel) });
   };
 }

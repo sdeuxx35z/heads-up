@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { ROLES } from './config.js';
 import { evaluateRondo, laneMargin } from './eval.js';
-import { Rep } from './rep.js';
+import { Rep, AWARE_BONUS, GAZE_CONE, GAZE_HOLD, GAZE_GAP } from './rep.js';
 import { PALETTE, SCENARIOS, SCENARIO_NAMES, SCENARIO_ROLES } from './scenarios.js';
 
 const rand = (a, b) => a + Math.random() * (b - a);
@@ -9,7 +9,6 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const angDiff = (a, b) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)));
 const heading = (from, to) => Math.atan2(to.x - from.x, to.z - from.z);
 const DEG = Math.PI / 180;
-const SEEN = 48 * DEG; // same head-angle test Rep uses for "saw it"
 
 const SQ = 12; // rondo square, metres
 const HALF = SQ / 2;
@@ -86,8 +85,7 @@ export class RondoDrill extends Rep {
     this.mates = this.home.slice(1, 5);
     this.mates.forEach((p, i) => {
       const sp = perimeterPoint(this.mateS[i], cx, cz);
-      p.place(sp.x, sp.z);
-      p.heading = heading(p.pos, this.centre);
+      p.place(sp.x, sp.z, heading(sp, this.centre));
       p.sync();
       p.wobble = Math.random() * 100;
       p.maxSpeed = 2.5;
@@ -129,11 +127,14 @@ export class RondoDrill extends Rep {
 
   evaluate(from) { return evaluateRondo(from, this.mates, this.defenders); }
 
+  // the rondo has its own short windows (the defenders hold a yard off; nobody tackles from 1.2 m)
+  decisionWindow(presserDist, aware) { return ((this.diff.window + (aware ? AWARE_BONUS : 0)) * this.windowScale) / this.speed; }
+
   nextPass(user) {
     const ball = this.world.ball, from = this.carrier;
     this.passesLeft--;
     if (this.passesLeft < 1) {
-      from.heading = heading(from.pos, user);
+      from.turnTo?.(heading(from.pos, user));
       this.ballAt(from);
       this.finalBall(from, user);
       return;
@@ -147,12 +148,12 @@ export class RondoDrill extends Rep {
       const s = m + rand(0, 1.2);
       if (s > bs) { bs = s; to = p; }
     }
-    from.heading = heading(from.pos, to.pos);
+    from.turnTo?.(heading(from.pos, to.pos));
     this.ballAt(from);
     ball.kick(ball.pos, to.pos, rand(14, 17) * this.speed, 0);
     this.receiver = to;
     this.events.push({ t: this.t, type: 'pass' });
-    this.fx.kick?.(0.7);
+    this.kickSound(0.7, ball.flight?.wait);
   }
 
   finalBall(from, user) {
@@ -297,6 +298,8 @@ export class AwarenessDrill extends Rep {
     this.cueSpots = null;
     this.cueSpot = -1;
     this.cueSeen = false;
+    this.cueHold = 0;
+    this.cueGap = 0;
     this.cueLeft = 0;
     this._cu = new THREE.Vector3();
   }
@@ -312,7 +315,13 @@ export class AwarenessDrill extends Rep {
       if (this.state === 'buildup' && this.t >= this.cueAt) this.fireCue();
     } else if (this.cueState === 1) {
       const user = w.userPos(this._cu);
-      if (angDiff(w.headYaw(), heading(user, this.cueP.pos)) < SEEN) this.cueSeen = true;
+      // the same look Rep credits: inside the 20 degree cone, held 0.12 s (gaps under 0.35 s forgiven); a snap turn is no look
+      if (!this.snapThisFrame && !this.cueSeen) {
+        if (angDiff(w.headYaw(), heading(user, this.cueP.pos)) < GAZE_CONE) {
+          this.cueHold += dt; this.cueGap = 0;
+          if (this.cueHold >= GAZE_HOLD) this.cueSeen = true;
+        } else if ((this.cueGap += dt) > GAZE_GAP) this.cueHold = 0;
+      }
       this.cueLeft -= dt;
       if (this.cueLeft <= 0) this.endCue();
     }

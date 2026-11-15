@@ -4,6 +4,31 @@ import { GLASS, edge } from './ui.js';
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const TYPES = ['nearest', 'count', 'free'];
 
+// --- scoring: each answer is graded against the distinct truth, so a blind or lazy answer cannot score ---
+
+// Where was the nearest opponent: the click's error against how far away he really was. 100 inside 25% of that
+// distance (never less than 2 m, and always short of the whole distance), down to 0 at the whole distance. Clicking
+// your own marker is off by exactly the true distance: 0, however close the presser is.
+export function nearestScore(err, trueDist) {
+  const full = Math.min(Math.max(2, 0.25 * trueDist), 0.6 * trueDist);
+  if (err <= full) return 100;
+  if (err >= trueDist) return 0;
+  return Math.round(100 * (1 - (err - full) / (trueDist - full)));
+}
+
+// How many within 10 m: exact 100, one out 25, anything else 0.
+export function countScore(guess, truth) {
+  const off = Math.abs(guess - Math.min(truth, 5));
+  return off === 0 ? 100 : off === 1 ? 25 : 0;
+}
+
+// Who had the most space: the freest man 100, any other man 0-20 by how much of his space the freest had.
+export function freeScore(chosen, freest) {
+  if (chosen === freest) return 100;
+  const best = freest.space || 1;
+  return Math.round(clamp((chosen.space / best) * 20, 0, 20));
+}
+
 // Questions asked in the dark, about the picture the viewer should have built.
 export function makeQuiz(snap) {
   if (snap.cue) return { type: snap.cue.mode === 'spot' && snap.cue.spots ? 'cuepos' : 'cue', snap, answered: false, score: 0, guess: null };
@@ -134,7 +159,7 @@ export function quizScreen(app, q) {
           const w = m.toWorld(hx, hy);
           q.guess = { x: w.x, z: w.z };
           const err = Math.hypot(w.x - q.snap.nearest.x, w.z - q.snap.nearest.z);
-          app.answerQuiz(Math.round(clamp(100 - (err - 2) * 9, 0, 100)));
+          app.answerQuiz(nearestScore(err, Math.hypot(q.snap.user.x - q.snap.nearest.x, q.snap.user.z - q.snap.nearest.z)));
         });
       } else {
         k.text(`${q.score}`, x0 + size + 40, y0 + 90, 80, { weight: 800, color: q.score >= 60 ? UI.good : UI.bad });
@@ -158,8 +183,7 @@ export function quizScreen(app, q) {
             size: 80,
             onClick: () => {
               q.guess = v;
-              const off = Math.abs(v - Math.min(q.snap.within, 5));
-              app.answerQuiz(off === 0 ? 100 : off === 1 ? 50 : 0);
+              app.answerQuiz(countScore(v, q.snap.within));
             },
           });
         }
@@ -183,8 +207,7 @@ export function quizScreen(app, q) {
             size: 130, r: 26,
             onClick: () => {
               q.guess = m;
-              const best = q.snap.freest.space || 1;
-              app.answerQuiz(m === q.snap.freest ? 100 : Math.round(clamp((m.space / best) * 60, 0, 60)));
+              app.answerQuiz(freeScore(m, q.snap.freest));
             },
           });
         }

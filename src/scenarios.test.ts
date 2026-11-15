@@ -88,14 +88,13 @@ const incomingWith = (f: (rep: any) => any, from = 0.5) => (rep: any, w: any) =>
 };
 
 const KEYS = Object.keys(SCENARIOS);
-// where a runner will be when a ball hit from the viewer's feet gets there
+// where a runner will be when a ball hit from the viewer's feet gets there (a fixed point on rep.runnerAt)
 const leadPoint = (rep: any, w: any) => {
-  const from = w.ball.pos, r = rep.runner;
-  let L = { x: r.pos.x, z: r.pos.z };
-  for (let i = 0; i < 5; i++) {
+  const from = w.ball.pos;
+  let L: any = { x: rep.runner.pos.x, z: rep.runner.pos.z };
+  for (let i = 0; i < 6; i++) {
     const T = Math.hypot(L.x - from.x, L.z - from.z) / 17;
-    const k = Math.min(Math.hypot(rep.E.x - r.pos.x, rep.E.z - r.pos.z), rep.runV * T);
-    L = { x: r.pos.x + rep.runDir.x * k, z: r.pos.z + rep.runDir.z * k };
+    L = rep.runnerAt(T, {});
   }
   return L;
 };
@@ -618,46 +617,114 @@ test('answers are never decided by the scenario alone: lane margins still rule',
   expect(['completed', 'tight', 'intercepted']).toContain(rep.result.outcome);
 });
 
-test('through: the line steps up while a forward runs in behind it; the through ball goes into his run', () => {
-  let sumLed = 0, sumFeet = 0;
-  const N = 14;
-  for (let i = 0; i < N; i++) {
+test('through: the back four step up as one flat line; the runner is timed onside or caught offside', () => {
+  const seen = { trap: 0, on: 0 };
+  let sumLed = 0, sumFeet = 0, nOn = 0;
+  for (let i = 0; i < 60 && (i < 24 || seen.trap < 6 || seen.on < 6); i++) {
     const role = i % 2 ? 'W' : 'ST';
     const A = make('through', role);
-    const x0 = A.rep.line.map((o: any) => o.pos.x);
-    let xs: number[] = [];
-    play(A.rep, A.w, (rep, w) => {
-      if (rep.state === 'incoming' && rep.runStarted) w.yaw = heading(w.user, rep.runner.pos);
-      if (rep.state === 'incoming' && !xs.length && rep.t - rep.strikeAt > 1.2) xs = rep.line.map((o: any) => o.pos.x);
-      if (rep.state === 'decide') aimAt(w, rep, leadPoint(rep, w), true);
+    const rep = A.rep;
+    expect(rep.line.length).toBe(4);
+    const x0 = rep.line.map((o: any) => o.pos.x);
+    expect(Math.max(...x0) - Math.min(...x0)).toBeLessThan(0.01); // level at the start
+    // nobody else is deeper than the four, now or after the step
+    for (const o of A.w.away) if (o.slot !== 'GK' && !rep.line.includes(o)) expect(o.pos.x).toBeLessThan(Math.min(...x0) - 1);
+    play(rep, A.w, (r, w) => {
+      // the line first (0.3 s on a centre back), then the runner
+      if (r.state === 'incoming') w.yaw = heading(w.user, r.t - r.strikeAt < 0.3 ? r.line[1].pos : r.runner.pos);
+      if (r.state === 'decide') aimAt(w, r, r.answer().offside ? r.answer().target : leadPoint(r, w), !r.answer().offside);
     });
-    const led = A.rep.result;
-    expect(xs.length).toBe(3);
-    xs.forEach((x, k) => expect(x0[k] - x).toBeGreaterThan(2.2)); // stepped up
-    expect(led.runnerSeen).toBe(true);
-    expect(led.quick).toBe(true);
-    expect(led.leadErr).toBeLessThan(1.5);
-    expect(led.correct).toBe(true);
-    expect(led.decision).toBe(100);
-    expect(['completed', 'tight']).toContain(led.outcome);
-    expect(led.fact).toMatch(/^THROUGH BALL \d\.\d M$/);
-    // the run is in behind the line: the runner ends up well past it
-    expect(A.rep.runner.pos.x).toBeGreaterThan(x0[0] + 5);
+    const res = rep.result;
+    // the line stepped up together, by the amount the rep planned, and is flat again once it has settled
+    const xs = rep.line.map((o: any) => o.pos.x);
+    xs.forEach((x: number, k: number) => expect(x0[k] - x).toBeGreaterThan(rep.step - 0.5));
+    expect(Math.max(...xs) - Math.min(...xs)).toBeLessThan(0.3);
+    expect(res.runnerSeen).toBe(true);
+    expect(res.lineSeen).toBe(true);
+    // the offside line is read at the pass: the deepest of the four against the runner
+    const o = rep.passOffside;
+    expect(o.offside).toBe(rep.trap);
+    expect(o.line).toBeCloseTo(Math.max(...rep.line.map((d: any) => d.pos.x)) + (rep.passOffside.line - o.line), 0);
+    expect(res.offside).toBe(rep.trap);
+    if (rep.trap) {
+      seen.trap++;
+      expect(o.margin).toBeGreaterThan(1.5);
+      expect(rep.answer().target).toBe(rep.passer);
+      expect(res.correct).toBe(true);
+      expect(res.fact).toBe('OFFSIDE RUN · RECYCLED');
+      expect(res.reason).toMatch(/^OFFSIDE BY \d\.\d M · RECYCLE$/);
+      expect(res.decision).toBe(100);
+      expect(['completed', 'tight']).toContain(res.outcome);
+      expect(res.scenarioScore).toBeGreaterThan(75);
+    } else {
+      seen.on++; nOn++;
+      expect(o.margin).toBeLessThan(-1.5);
+      expect(res.correct).toBe(true);
+      expect(res.quick).toBe(true);
+      expect(res.leadErr).toBeLessThan(1.5);
+      expect(res.decision).toBe(100);
+      expect(['completed', 'tight']).toContain(res.outcome);
+      expect(res.fact).toMatch(/^THROUGH BALL \d\.\d M$/);
+      expect(res.reason).toMatch(/^ONSIDE BY \d\.\d M · THROUGH BALL$/);
+      // the run is in behind the line: the runner ends up well past it
+      expect(rep.runner.pos.x).toBeGreaterThan(x0[0]);
+    }
 
-    const B = make('through', role);
-    // at his feet: the ball hits the grass where he stands
-    play(B.rep, B.w, (rep, w) => { if (rep.state === 'decide') aimAt(w, rep, { x: rep.runner.pos.x, z: rep.runner.pos.z }, true); });
-    expect(B.rep.result.leadErr).toBeGreaterThan(1.5);
-    expect(B.rep.result.correct).toBe(false);
-    expect(B.rep.result.scenarioScore).toBeLessThan(led.scenarioScore);
+    // a pass to the runner when he is offside is flagged and given away; to his feet when onside is off the run
+    const same = () => { let m = make('through', role); while (m.rep.trap !== rep.trap) m = make('through', role); return m; };
+    const B = same();
+    play(B.rep, B.w, (r, w) => { if (r.state === 'decide') aimAt(w, r, r.runner); });
+    if (B.rep.trap) {
+      expect(B.rep.result.fact).toBe('OFFSIDE');
+      expect(B.rep.result.correct).toBe(false);
+      expect(B.rep.result.outcome).toBe('intercepted');
+      expect(B.rep.result.decision).toBe(0);
+      expect(B.rep.result.scenarioScore).toBeLessThan(20);
+      expect(B.rep.events.some((e: any) => e.type === 'offside')).toBe(true);
+    } else {
+      expect(B.rep.result.offside).toBe(false);
+      expect(B.rep.result.leadErr).toBeGreaterThan(res.leadErr);
+      expect(B.rep.result.scenarioScore).toBeLessThanOrEqual(res.scenarioScore);
+      sumLed += res.scenarioScore; sumFeet += B.rep.result.scenarioScore;
+    }
 
-    const C = make('through', role);
+    // any other pass: the wrong call when onside (RUNNER MISSED), a valid recycle when he is offside
+    const C = same();
     play(C.rep, C.w, decideWith((r) => r.wrongs()[0]));
-    expect(C.rep.result.fact).toBe('RUNNER MISSED');
-    expect(C.rep.result.decision).toBeLessThan(100);
-    sumLed += led.scenarioScore; sumFeet += B.rep.result.scenarioScore;
+    if (C.rep.trap) {
+      expect(C.rep.result.fact).toBe('OFFSIDE');
+      expect(C.rep.result.correct).toBe(false);
+    } else {
+      expect(C.rep.result.fact).toBe('RUNNER MISSED');
+      expect(C.rep.result.correct).toBe(false);
+      expect(C.rep.result.decision).toBeLessThan(100);
+    }
+    const D = same();
+    play(D.rep, D.w, decideWith((r) => r.passer));
+    if (D.rep.trap) { expect(D.rep.result.correct).toBe(true); expect(D.rep.result.decision).toBe(100); }
+    else { expect(D.rep.result.fact).toBe('RUNNER MISSED'); expect(D.rep.result.correct).toBe(false); }
   }
-  expect(sumLed / N).toBeGreaterThan(sumFeet / N + 15);
+  expect(seen.trap).toBeGreaterThan(5);
+  expect(seen.on).toBeGreaterThan(5);
+  expect(sumLed / nOn).toBeGreaterThan(sumFeet / nOn + 8);
+});
+
+test('through: a runner who is timed onside goes offside if the pass is held too long', () => {
+  let tested = 0;
+  for (let i = 0; i < 80 && tested < 6; i++) {
+    const { w, rep } = make('through', i % 2 ? 'W' : 'ST');
+    if (rep.trap) continue;
+    tested++;
+    let waited = 0;
+    play(rep, w, (r, ww) => {
+      if (r.state === 'incoming' && r.finalStruck) ww.yaw = heading(ww.user, r.runner.pos);
+      if (r.state === 'decide') { r.window = 5; waited += 1 / 30; if (waited > 1.3) aimAt(ww, r, r.runner); }
+    });
+    expect(rep.result.offside).toBe(true); // he ran past the line while the ball was held
+    expect(rep.result.fact).toBe('OFFSIDE');
+    expect(rep.result.correct).toBe(false);
+  }
+  expect(tested).toBeGreaterThan(5);
 });
 
 test('gkbuild: play to the open centre back, or go long when both are shut', () => {
@@ -693,5 +760,188 @@ test('gkbuild: the keeper stands on his goal line and the strikers jump from the
     expect(w.user.x).toBeLessThan(-45);
     expect(rep.longMan.pos.x).toBeGreaterThan(-15);
     for (const o of [rep.s1, rep.s2]) expect(o.pos.x).toBeGreaterThan(w.user.x + 5);
+  }
+});
+
+// --- round 3 fixes -----------------------------------------------------------------------------
+
+// look at p for `secs` of game time (stepping the rep), then back at the ball
+function lookFor(w: any, rep: any, p: any, secs: number, snap = false) {
+  const steps = Math.round(secs * 60);
+  for (let i = 0; i < steps; i++) {
+    w.yaw = heading(w.user, p.pos ?? p);
+    if (snap) w.snapTurned = true;
+    rep.update(1 / 60);
+  }
+}
+
+test('saw: Rep\'s gaze (20 degree cone held 0.12 s); one frame, a wide glance, or snap-turn frames do not count', () => {
+  // one frame straight at him: nothing
+  const A = make('press', 'CM');
+  lookFor(A.w, A.rep, A.rep.presser, 1 / 60);
+  A.w.yaw = heading(A.w.user, A.w.ball.pos);
+  for (let i = 0; i < 20; i++) A.rep.update(1 / 60);
+  expect(A.rep.saw.presser).toBeUndefined();
+  // 35 degrees off him for most of a second: inside the old 48 degree test, outside the cone
+  const B = make('press', 'CM');
+  const off = B.w.user.clone();
+  for (let i = 0; i < 45; i++) { B.w.yaw = heading(B.w.user, B.rep.presser.pos) + 35 * Math.PI / 180; B.rep.update(1 / 60); }
+  expect(B.rep.saw.presser).toBeUndefined();
+  expect(B.rep.state).toBe('buildup');
+  // held at him for 0.2 s: seen
+  const C = make('press', 'CM');
+  lookFor(C.w, C.rep, C.rep.presser, 0.2);
+  expect(C.rep.saw.presser).toBe(true);
+  expect(C.rep.saw.free).toBeUndefined();
+  // a snap turn that swings the view onto him, held: the controller turned, he was not looked at
+  const D = make('press', 'CM');
+  lookFor(D.w, D.rep, D.rep.presser, 0.5, true);
+  expect(D.rep.saw.presser).toBeUndefined();
+  expect(D.rep.snapThisFrame).toBe(true);
+  // and a genuine look afterwards still counts
+  lookFor(D.w, D.rep, D.rep.presser, 0.2);
+  expect(D.rep.saw.presser).toBe(true);
+  expect(off.x).toBe(B.w.user.x);
+});
+
+test('saw: a short break in the look is forgiven, a long one starts again', () => {
+  const A = make('press', 'CM');
+  lookFor(A.w, A.rep, A.rep.presser, 0.08);
+  lookFor(A.w, A.rep, { x: A.w.user.x, z: A.w.user.z - 40 }, 0.2); // looks the other way for 0.2 s
+  expect(A.rep.saw.presser).toBeUndefined();
+  lookFor(A.w, A.rep, A.rep.presser, 0.06);
+  expect(A.rep.saw.presser).toBe(true);
+  const B = make('press', 'CM');
+  lookFor(B.w, B.rep, B.rep.presser, 0.08);
+  const away = { x: B.w.user.x, z: B.w.user.z - 40 };
+  lookFor(B.w, B.rep, { x: B.w.user.x - 40, z: B.w.user.z + 40 }, 0.5);
+  lookFor(B.w, B.rep, B.rep.presser, 0.06);
+  expect(B.rep.saw.presser).toBeUndefined();
+  expect(away.z).toBeLessThan(B.w.user.z);
+});
+
+test('turn: no shoulder check cannot reach the 60 mark; the check, the right pass and an open body can', () => {
+  for (let n = 0; n < 16; n++) {
+    const role = n % 2 ? 'CM' : 'CDM';
+    const scanned = (rep: any, w: any) => {
+      if (rep.state === 'incoming' && rep.t - rep.strikeAt < 0.8 && rep.t - rep.strikeAt > 0.1) w.yaw = heading(w.user, rep.presser.pos);
+      else if (rep.state === 'incoming') w.yaw = heading(w.user, w.ball.pos);
+    };
+    // checked, turned: full marks need the body shape too
+    const A = make('turn', role);
+    play(A.rep, A.w, (rep, w) => { scanned(rep, w); if (rep.state === 'decide') aimAt(w, rep, rep.answer().target); });
+    expect(A.rep.result.shoulderScan).toBe(true);
+    expect(A.rep.result.scenarioScore).toBeGreaterThanOrEqual(75);
+    expect(A.rep.result.reason).toBe('SHOULDER CHECK · TURN AND PLAY FORWARD');
+
+    // not checked, bounced back in one touch: the right pass, but nothing like the 60 mark
+    const B = make('turn', role);
+    play(B.rep, B.w, incomingWith((r) => r.passer, 0.9));
+    expect(B.rep.result.shoulderScan).toBe(false);
+    expect(B.rep.result.correct).toBe(true);
+    expect(B.rep.result.scenarioScore).toBeLessThanOrEqual(55);
+    expect(B.rep.result.reason).toBe('NO SHOULDER CHECK · BOUNCE IT BACK');
+    // however the body is set: the ceiling is 55 for every shape
+    for (const body of ['HALF-TURN', 'OPEN', 'CLOSED']) {
+      const r: any = { body, outcome: 'completed' };
+      const C = make('turn', role);
+      C.rep.chosen = { target: C.rep.passer }; C.rep.decideT = 0.3;
+      C.rep.describe(r);
+      expect(r.correct).toBe(true);
+      expect(r.scenarioScore).toBeLessThanOrEqual(55);
+    }
+    // checked, but the wrong pass: also under the mark
+    const D = make('turn', role);
+    play(D.rep, D.w, (rep, w) => { scanned(rep, w); if (rep.state === 'decide') aimAt(w, rep, rep.passer); });
+    expect(D.rep.result.shoulderScan).toBe(true);
+    expect(D.rep.result.correct).toBe(false);
+    expect(D.rep.result.scenarioScore).toBeLessThanOrEqual(55);
+  }
+});
+
+test('turn: a flick, a waggle or a snap turn is not a shoulder check', () => {
+  const run = (look: (rep: any, w: any) => void) => {
+    const A = make('turn', 'CDM');
+    play(A.rep, A.w, (rep, w) => { look(rep, w); if (rep.state === 'decide') aimAt(w, rep, rep.freeMid); });
+    return A.rep.result;
+  };
+  // 0.08 s at the presser
+  expect(run((rep, w) => { if (rep.state === 'incoming') w.yaw = heading(w.user, rep.t - rep.strikeAt > 0.3 && rep.t - rep.strikeAt < 0.38 ? rep.presser.pos : w.ball.pos); }).shoulderScan).toBe(false);
+  // a lazy drift to 50 degrees
+  expect(run((rep, w) => { if (rep.state === 'incoming') w.yaw = heading(w.user, w.ball.pos) + (rep.t - rep.strikeAt > 0.3 && rep.t - rep.strikeAt < 0.8 ? 50 * Math.PI / 180 : 0); }).shoulderScan).toBe(false);
+  // the rig turned round and back: the controller did it, the head did not
+  expect(run((rep, w) => {
+    if (rep.state !== 'incoming') return;
+    const k = rep.t - rep.strikeAt;
+    const behind = k > 0.2 && k < 0.9;
+    const want = heading(w.user, behind ? rep.presser.pos : w.ball.pos);
+    if (want !== w.yaw) w.snapTurned = true;
+    w.yaw = want;
+  }).shoulderScan).toBe(false);
+});
+
+test('every scenario result carries correct and oneTouchBack as booleans and a card reason in the scenario\'s own words', () => {
+  const REASON: Record<string, RegExp> = {
+    press: /^PRESSER \d+\.\d M · (ONE TOUCH|HALF-TURN)$/,
+    switch: /^LANE -?\d+\.\d M (OPEN|TIGHT) · (SWITCH|RECYCLE)$/,
+    thirdman: /^MARKER ON YOUR BACK · ONE TOUCH INTO THE RUN$/,
+    signal: /^#\d+ WAVING, COVERED · #\d+ FREE$/,
+    colour: /^[A-Z]+ CALLED · FIRST TIME$/,
+    turn: /^(SHOULDER CHECK · TURN AND PLAY FORWARD|NO SHOULDER CHECK · BOUNCE IT BACK)$/,
+    inhibit: /^(TONE · LANE SHUT · SWITCH WITHIN 0\.8 S|NO TONE · LANE STAYED OPEN)$/,
+    sandwich: /^PRESSERS BOTH SIDES · ONE TOUCH BACK$/,
+    through: /^(OFFSIDE BY \d+\.\d M · RECYCLE|ONSIDE( BY \d+\.\d M)? · THROUGH BALL)$/,
+    gkbuild: /^(BOTH CENTRE BACKS SHUT · GO LONG|ONE CENTRE BACK SHUT · PLAY TO THE OPEN SIDE)$/,
+  };
+  for (const key of KEYS) {
+    for (let n = 0; n < 4; n++) {
+      const plays = [noop, decideWith((r) => r.answer().target), incomingWith((r) => r.answer().target, 0.5)];
+      const A = make(key, undefined, { diff: n % 2 ? 'HARD' : 'EASY' });
+      play(A.rep, A.w, plays[n % 3]);
+      const r = A.rep.result;
+      expect(typeof r.correct).toBe('boolean');
+      expect(typeof r.oneTouchBack).toBe('boolean');
+      expect(r.reason).toMatch(REASON[key]);
+      expect(r.reason).not.toMatch(/\b(YOU|SHOULD|TRY)\b/);
+      expect(r.reason.length).toBeLessThan(48);
+      // not Rep's generic reason ("LANE 3.4 M OPEN") unless the scenario means it
+      if (key !== 'switch') expect(r.reason).not.toMatch(/^(LANE|SAFEST|FORWARD|SPACE)/);
+      if (r.oneTouchBack) expect(r.oneTouch).toBe(true);
+      if (n % 3 === 0) { expect(r.oneTouchBack).toBe(false); expect(r.correct).toBe(false); } // nobody touched it
+    }
+  }
+});
+
+test('oneTouchBack: true only when the scenario\'s one-touch answer was played before the ball arrived', () => {
+  for (let n = 0; n < 12; n++) {
+    const role = SCENARIO_ROLES.sandwich[n % 3];
+    const A = make('sandwich', role);
+    play(A.rep, A.w, incomingWith((r) => r.passer, 0.4));
+    expect(A.rep.result.oneTouchBack).toBe(true);
+    const B = make('sandwich', role);
+    play(B.rep, B.w, decideWith((r) => r.passer));
+    expect(B.rep.result.oneTouchBack).toBe(false);
+    const C = make('sandwich', role);
+    play(C.rep, C.w, incomingWith((r) => r.gapMan, 0.4));
+    expect(C.rep.result.oneTouchBack).toBe(false);
+  }
+  // the others: colour call is a one-touch answer too
+  for (let n = 0; n < 6; n++) {
+    const A = make('colour');
+    play(A.rep, A.w, incomingWith((r) => r.calledPlayer, 0.9));
+    expect(A.rep.result.oneTouchBack).toBe(A.rep.result.oneTouch && A.rep.result.correct);
+  }
+});
+
+test('the window is the scenario\'s own floor when the presser is close: inhibition keeps room for the tone', () => {
+  for (let n = 0; n < 8; n++) {
+    const { w, rep } = make('inhibit', SCENARIO_ROLES.inhibit[n % 3]);
+    play(rep, w, (r, ww) => { if (r.state === 'decide') r.window = r.window; });
+    expect(rep.result.decideTime).toBeGreaterThanOrEqual(2.2 - 0.1);
+  }
+  for (const key of KEYS) {
+    const { w, rep } = make(key);
+    play(rep, w, noop);
+    expect(rep.window).toBeGreaterThanOrEqual((SCENARIOS as any)[key].minWindow - 1e-9);
   }
 });

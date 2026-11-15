@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { teammateNumbers, gazeAmount } from "./locker.js";
+import { teammateNumbers, gazeAmount, SIGNS, SIGN_TEXT, signCapHeight } from "./locker.js";
 
 test("teammate numbers skip the player's own and stay unique", () => {
   for (const n of [1, 8, 11, 0, 23]) {
@@ -22,4 +22,25 @@ test("door gaze is 1 when looking straight at it and 0 when turned away", () => 
   const mid = gazeAmount(from, { x: -Math.cos(a), y: 0, z: Math.sin(a) }, door);
   expect(mid).toBeGreaterThan(0.05);
   expect(mid).toBeLessThan(0.7);
+});
+
+test("every sign has letters of at least 8 cm (1 degree at 4.5 m)", () => {
+  for (const key of Object.keys(SIGNS)) {
+    const cap = signCapHeight(key);
+    expect(cap).toBeGreaterThanOrEqual(0.08);
+    // the plate itself holds the letters with room to spare
+    expect(SIGNS[key as keyof typeof SIGNS].h).toBeGreaterThan(cap);
+  }
+  // the door sign: cap height as seen from the spawn, 4.5 m away
+  const deg = (Math.atan2(signCapHeight("continue"), 4.5) * 180) / Math.PI;
+  expect(deg).toBeGreaterThanOrEqual(1);
+  // header plates and the door label keep readable letters even for the longest label
+  expect(signCapHeight("continue", "CAREER COMPLETE")).toBeGreaterThanOrEqual(0.08);
+  expect(signCapHeight("continue", "PLAY")).toBeCloseTo(SIGNS.continue.cap, 6);
+});
+
+test("the SETTINGS plate fits the gap between the door frame and the first locker", () => {
+  // gap beside the door is 0.59 m wide
+  expect(SIGNS.settings.w).toBeLessThanOrEqual(0.57);
+  expect(Object.keys(SIGN_TEXT).sort()).toEqual(["career", "practice", "settings", "stats", "today"]);
 });

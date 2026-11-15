@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { AWAY_442, PITCH } from './config.js';
 import { laneMargin } from './eval.js';
-import { Rep } from './rep.js';
+import { Rep, offsideLine } from './rep.js';
 
 // ---------------------------------------------------------------------------------------------
 // Scenario reps: one believable football situation each (research D1-D12). Every class extends Rep,
@@ -18,7 +18,6 @@ const angDiff = (a, b) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)))
 const heading = (from, to) => Math.atan2(to.x - from.x, to.z - from.z);
 const dist2 = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
 const DEG = Math.PI / 180;
-const SEEN = 48 * DEG; // the head-angle test Rep uses for "saw it"
 const BONUS = 0.55; // extra value for the right pass
 const f1 = (v) => v.toFixed(1);
 
@@ -56,6 +55,7 @@ export class Scenario extends Rep {
   static flight = 1.3; // seconds the last pass takes to reach the viewer
   static quizOK = false; // a blackout quiz would break the timing of most scenarios
   static window = 1; // multiplier on the decision window
+  static minWindow = 1; // seconds on the ball whatever the presser's distance (the dynamic window can run shorter)
 
   constructor(world, opts = {}) {
     const C = new.target;
@@ -95,6 +95,8 @@ export class Scenario extends Rep {
     this.watch = {};
     this.saw = {};
     this.sawAt = {};
+    this._wacc = null; // gaze accumulators for the watch list, sized on first use
+    this._wseen = null;
     this.chain = [];
     this.away.forEach((o) => { o.role = null; o.stalk = null; });
     this.home.forEach((p) => p.highlight?.(0xffffff, 0));
@@ -398,20 +400,36 @@ export class Scenario extends Rep {
     }
   }
 
-  // runs on real time before the world moves
-  pre() {
+  // runs on real time before the world moves. "Saw it" is Rep's own look: inside the 20 degree gaze cone, held
+  // 0.12 s (gaps under 0.35 s forgiven). The frame a snap turn swung the view looks at nobody (Rep clears
+  // world.snapTurned in trackScan, which runs after this, so it is still set here).
+  pre(s) {
     const st = this.state;
     if (st !== 'buildup' && st !== 'incoming') return;
-    const w = this.world, user = w.userPos(this._u), yaw = w.headYaw();
-    for (const k in this.watch) {
-      const e = this.watch[k];
+    const w = this.world;
+    if (w.snapTurned) return;
+    const keys = Object.keys(this.watch);
+    if (!keys.length) return;
+    if (!this._wacc || this._wacc.length !== keys.length * 2) {
+      this._wacc = new Float32Array(keys.length * 2);
+      this._wseen = keys.map(() => -99);
+    }
+    const user = w.userPos(this._u), yaw = w.headYaw();
+    for (let i = 0; i < keys.length; i++) {
+      const e = this.watch[keys[i]];
       if (e.when && !e.when()) continue;
-      if (angDiff(yaw, heading(user, e.p.pos)) < SEEN) { this.saw[k] = true; this.sawAt[k] = this.t; }
+      this.gaze(this._wacc, i, this._wseen, yaw, e.p.pos, user.x, user.z, s || 0);
+      if (this._wseen[i] > -90) { this.saw[keys[i]] = true; this.sawAt[keys[i]] = this._wseen[i]; }
     }
   }
 
   // runs after the world moved
   post() {}
+
+  // Rep's dynamic window (a close presser tackles quickly), but a scenario that needs a protocol time keeps it
+  decisionWindow(presserDist, aware) {
+    return Math.max(super.decisionWindow(presserDist, aware), (this.constructor.minWindow ?? 1) / this.speed);
+  }
 
   // ---- the ball ---------------------------------------------------------------------------------
 
@@ -486,7 +504,7 @@ export class Scenario extends Rep {
     for (const o of options) {
       if (o.scen !== undefined) continue;
       const d = this.scenarioValue(o);
-      if (d) { o.value = Math.max(0, o.value + d); touched = true; }
+      if (d) { o.value += d; touched = true; }
     }
     // the right pass always ranks first, however the lanes have closed since
     const a = this.answer();
@@ -500,13 +518,23 @@ export class Scenario extends Rep {
     return options;
   }
 
+  // Adds the scenario's own fields to the result: scenario, scenarioScore, fact, expected, expectedNumber,
+  // correct (always a boolean), oneTouchBack (the viewer played the scenario's one-touch answer first time)
+  // and reason (the card's one short fact: the scenario's own, not Rep's generic "lane open").
   scenarioResult(r) {
+    const a = this.answer(), ch = this.chosen?.target;
+    const generic = r.reason;
     r.scenario = this.drillKey;
     r.scenarioScore = 0;
     r.fact = '';
     r.correct = false;
-    r.expectedNumber = this.answer()?.target?.number ?? null;
+    r.expectedNumber = a?.target?.number ?? null;
+    r.oneTouchBack = !!(a?.one && ch && ch === a.target && (this.oneTouch ?? this._ot));
     this.describe(r);
+    r.correct = !!r.correct;
+    r.oneTouchBack = !!r.oneTouchBack;
+    r.scenarioScore = Math.round(clamp(r.scenarioScore, 0, 100));
+    if (r.reason === generic) r.reason = [r.fact, r.expected].filter(Boolean).join(' · ') || generic;
   }
 
   describe() {}
@@ -596,6 +624,7 @@ export class PressScenario extends Scenario {
     r.sawPresserBehind = seen;
     r.fact = `PRESSER ${f1(this.presserDist ?? 0)} M`;
     r.expected = a.one ? 'ONE TOUCH' : 'HALF-TURN';
+    r.reason = `PRESSER ${f1(this.presserDist ?? 0)} M · ${r.expected}`;
     r.scenarioScore = r.correct ? (seen ? 100 : 65) : (seen ? 30 : 0);
   }
 }
@@ -707,6 +736,7 @@ export class SwitchScenario extends Scenario {
     r.sawFar = !!this.saw.far;
     r.fact = `LANE ${f1(Math.max(-9.9, m))} M ${m >= 1.5 ? 'OPEN' : 'TIGHT'}`;
     r.expected = a.target === this.winger ? 'SWITCH' : 'RECYCLE';
+    r.reason = `${r.fact} · ${r.expected}`;
     r.scenarioScore = r.correct ? (r.sawFar ? 100 : 70) : (r.sawFar ? 30 : 0);
   }
 }
@@ -866,6 +896,7 @@ export class ThirdManScenario extends Scenario {
     r.correct = toRunner && lead != null && lead <= 2.0 && !!quick;
     r.fact = !toRunner ? 'RUNNER MISSED' : lead == null ? 'PASS LOST' : lead <= 2 ? `INTO THE RUN ${f1(lead)} M` : `OFF THE RUN ${f1(lead)} M`;
     r.expected = 'ONE TOUCH INTO THE RUN';
+    r.reason = 'MARKER ON YOUR BACK · ONE TOUCH INTO THE RUN';
     r.scenarioScore = (seen ? 30 : 0) + (quick && toRunner ? 30 : 0) + (toRunner && lead != null ? Math.round(40 * clamp(1 - lead / 4.5, 0, 1)) : 0);
   }
 }
@@ -960,6 +991,7 @@ export class SignalScenario extends Scenario {
     r.correct = !!ch && ch === this.quiet || (!followed && (r.decision ?? 0) >= 70);
     r.fact = followed ? 'FOLLOWED THE WAVE' : 'WAVE IGNORED';
     r.expected = 'IGNORE THE WAVE';
+    r.reason = `#${this.waver.number} WAVING, COVERED · #${this.quiet.number} FREE`;
     r.scenarioScore = followed ? 0 : r.correct ? (r.sawQuiet ? 100 : 70) : 40;
   }
 }
@@ -974,6 +1006,7 @@ export class ColourScenario extends Scenario {
   static flight = 1.5;
   static quizOK = false;
   static window = 0.8; // about 1.5 s on the ball at MEDIUM: the pass is due within 1.0 s
+  static minWindow = 1.5;
 
   build() {
     const d = this.diff;
@@ -1091,6 +1124,7 @@ export class ColourScenario extends Scenario {
     r.correct = ch === this.calledPlayer;
     r.fact = r.correct ? `CALLED ${c.name}${rt != null ? ` ${rt.toFixed(1)} S` : ''}` : `CALLED ${c.name}, PLAYED ${r.pickedColour ?? 'OTHER'}`;
     r.expected = `FIRST TIME TO ${c.name}`;
+    r.reason = `${c.name} CALLED · FIRST TIME`;
     r.scenarioScore = r.correct ? (r.onTime ? 100 : 60) : 0;
   }
 }
@@ -1136,7 +1170,6 @@ export class TurnScenario extends Scenario {
 
     this.passer = cb; this.otherCB = cb2; this.freeMid = mid; this.presser = pr;
     this.free = mid; this.pressers = [pr];
-    this.shoulderT = -99;
     this.watch = { mid: { p: mid }, presser: { p: pr } };
   }
 
@@ -1144,17 +1177,17 @@ export class TurnScenario extends Scenario {
     if (!this.closeIn(this.presser, user, this.dA, 1.1)) this.stalkUser(this.presser, user, 3.2);
   }
 
-  // a shoulder scan: head well past 100 degrees from the ball, looking at the man behind
-  pre(s) {
-    super.pre(s);
-    if (this.state !== 'buildup' && this.state !== 'incoming') return;
-    const w = this.world, user = w.userPos(this._u), yaw = w.headYaw();
-    if (angDiff(yaw, heading(user, w.ball.pos)) > 100 * DEG && angDiff(yaw, heading(user, this.presser.pos)) < 60 * DEG) this.shoulderT = this.t;
+  // A shoulder check is one of Rep's own scans: the head went past 100 degrees off the ball, held, over play (a
+  // player in view or open pitch), never a snap turn. One in the last 3.5 s counts, or one still going.
+  shoulderNow() {
+    const t = this.t;
+    for (const sc of this.scans) if (sc.shoulder && sc.end > t - 3.5) return true;
+    return !!(this.inScan && this.scanPeak > 100 * DEG && this.scanSaw && t - this.scanStart >= 0.18 && this.scanDwell >= 0.1);
   }
 
-  atArrival() { this.shoulder = this.t - this.shoulderT < 3.5; }
+  atArrival() { this.shoulder = this.shoulderNow(); }
 
-  hasShoulder() { return this.shoulder ?? (this.t - this.shoulderT < 3.5); }
+  hasShoulder() { return this.shoulder ?? this.shoulderNow(); }
 
   answer() { return this.hasShoulder() ? { target: this.freeMid, one: false } : { target: this.passer, one: true }; }
   wrongs() { return this.hasShoulder() ? [this.passer] : [this.freeMid]; }
@@ -1176,8 +1209,11 @@ export class TurnScenario extends Scenario {
     r.correct = !!ch && (sh ? forward : (ch === this.passer || ch === this.otherCB));
     r.fact = sh ? 'SHOULDER SCAN' : 'NO SCAN BEHIND';
     r.expected = sh ? 'TURN AND PLAY FORWARD' : 'ONE TOUCH BACK';
-    const body = r.body === 'HALF-TURN' ? 20 : r.body === 'OPEN' ? 14 : r.body === 'CLOSED' ? 4 : 10;
-    r.scenarioScore = (sh ? 40 : 0) + (r.correct ? 40 : 0) + body;
+    r.reason = sh ? 'SHOULDER CHECK · TURN AND PLAY FORWARD' : 'NO SHOULDER CHECK · BOUNCE IT BACK';
+    // the shoulder check carries the score (40), the right pass 35, the body shape 25; without the check, or
+    // with the wrong pass, 55 is the ceiling, so the 60 mark needs both
+    const body = r.body === 'HALF-TURN' ? 25 : r.body === 'OPEN' ? 17 : r.body === 'CLOSED' ? 5 : 10;
+    r.scenarioScore = Math.min((sh ? 40 : 0) + (r.correct ? 35 : 0) + body, sh && r.correct ? 100 : 55);
   }
 }
 
@@ -1191,6 +1227,7 @@ export class InhibitScenario extends Scenario {
   static flight = 1.3;
   static quizOK = false;
   static window = 1.3;
+  static minWindow = 2.2; // the tone comes 0.5-1 s into the aim, then 0.8 s (half speed) to switch
 
   build() {
     const d = this.diff;
@@ -1321,6 +1358,7 @@ export class InhibitScenario extends Scenario {
     r.correct = !!ok;
     r.fact = !this.cueFired ? 'NO TONE' : this.repeated ? 'REPEATED THE PASS' : dl == null ? 'NO SWITCH' : dl <= 0.8 ? `SWITCHED ${dl.toFixed(2)} S` : `SLOW ${dl.toFixed(2)} S`;
     r.expected = 'SWITCH ON THE TONE';
+    r.reason = this.cueFired ? 'TONE · LANE SHUT · SWITCH WITHIN 0.8 S' : 'NO TONE · LANE STAYED OPEN';
     r.scenarioScore = !this.cueFired ? 50 : this.repeated ? 0 : dl == null ? 0 : dl <= 0.8 ? Math.round(100 - (dl / 0.8) * 20) : dl <= 1.6 ? 50 : 25;
   }
 }
@@ -1393,13 +1431,17 @@ export class SandwichScenario extends Scenario {
     r.correct = back && kept;
     r.fact = back ? (one ? 'ONE TOUCH BACK' : 'SECOND TOUCH BACK') : ch === this.gapMan ? 'THROUGH THE GAP' : 'OTHER PASS';
     r.expected = 'ONE TOUCH BACK';
+    r.reason = 'PRESSERS BOTH SIDES · ONE TOUCH BACK';
     r.scenarioScore = (back ? 40 : 0) + (back && one ? 25 : 0) + (kept ? 20 : 0) + (both ? 15 : 0);
   }
 }
 
 // ---------------------------------------------------------------------------------------------
-// D11 Line steps up. The back line steps up as the ball comes to you; a forward starts into the
-// space behind it. A through ball into his run, within a second and within 1.5 m of the line he runs.
+// D11 Line steps up. The back four step up together as the ball comes to you and a forward runs. Half the
+// reps the line catches him: he is beyond the second-last defender when the ball is played, so a pass to
+// him is offside and the answer is to recycle. The other half he is timed onside: a through ball into his
+// run, within a second and within 1.5 m of the line he runs. The offside line is read at the moment of the
+// pass, from the pitch as it is then.
 // ---------------------------------------------------------------------------------------------
 export class ThroughScenario extends ThirdManScenario {
   static key = 'through';
@@ -1414,53 +1456,90 @@ export class ThroughScenario extends ThirdManScenario {
     const ux = (wing ? 9 : 8) + rand(-2, 2), uz = wing ? side * rand(14, 19) : rand(-4, 4); // the striker has dropped in to receive
     const cx = ux - rand(18, 21), cz = clamp(uz * 0.5 + rand(-6, 6), -13, 13);
     this.userAt(ux, uz, cx, cz);
-    const U = this.U, h = heading(U, { x: cx, z: cz }), rsn = sign();
+    const U = this.U;
     const carrier = this.pickMate(['LCM', 'RCM', 'CDM', 'LDM', 'RDM', 'LCB', 'RCB']);
     this.put(carrier, cx, cz);
 
-    // the run: from level with the back line, in behind, roughly along the viewer's line
-    const end = { x: Math.min(ux + 24, 33), z: clamp(uz * 0.6 + rand(-5, 5), -26, 26) };
-    const xl = ux + 8.5, zl = uz + (end.z - uz) * (xl - ux) / (end.x - ux);
-    const start = { x: xl - 0.6, z: zl };
+    // The line steps `step` m up the pitch from xl. Trap: it steps far, and the runner (who left early) is
+    // beyond it when the ball arrives. On: it barely moves and the runner starts late, so he is still behind it.
+    // The start spot is worked back from where he should be at the arrival (0.88: acceleration and the angle).
+    this.trap = Math.random() < 0.5;
+    const T = this.flightT / this.gameSpeed, runV = 6.5 * this.speed;
+    const xl = ux + 8.5;
+    const ex = Math.min(ux + 24, 33), ez0 = clamp(uz * 0.6 + rand(-5, 5), -26, 26);
+    const zl = uz + (ez0 - uz) * (xl - ux) / (ex - ux); // where he crosses the line: through the middle of the gap
+    const step = this.trap ? rand(3.6, 4.4) : rand(0.8, 1.5);
+    const margin = this.trap ? rand(2.4, 3.4) : -rand(3.4, 4.2); // runner minus line, metres, at the arrival
+    const runFor = this.trap ? Math.max(0.5, T - 0.25) : clamp(0.4 * T, 0.35, Math.max(0.4, T - 0.25));
+    const lat = (zl >= uz ? 1 : -1) * rand(3.2, 4.0); // wide of the viewer's line, so he does not start on top of him
+    let sx = xl - step + margin - runFor * runV * 0.88;
+    for (let k = 0; k < 2; k++) sx = xl - step + margin - runFor * runV * 0.95 / Math.sqrt(1 + (lat / (xl - sx)) ** 2); // his run is a diagonal
+    const start = { x: sx, z: clamp(zl + lat, -28, 28) };
+    // a diagonal run: from his spot, through the gap, on to the end
+    const end = { x: ex, z: clamp(start.z + (zl - start.z) * (ex - sx) / (xl - sx), -30, 30) };
     const runner = this.pickMate(['ST', 'RW', 'LW', 'CAM']);
     this.put(runner, start.x, start.z);
-    // three defenders level with him, a gap of 5.8 m either side of the run
-    const dl = [this.pickOpp(['LCB', 'RCB']), this.pickOpp(['RCB', 'LCB']), this.pickOpp(['LB', 'RB'])];
-    this.put(dl[0], xl, zl - 5.8);
-    this.put(dl[1], xl + rand(-0.4, 0.4), zl + 5.8);
-    this.put(dl[2], xl + rand(-0.4, 0.4), zl + (rand(0, 1) < 0.5 ? -1 : 1) * rand(12, 14));
-    for (const o of dl) this.pinned.add(o);
+
+    // the back four, level, a gap either side of the run
+    const dl = [this.pickOpp(['LCB', 'RCB']), this.pickOpp(['RCB', 'LCB']), this.pickOpp(['LB', 'RB']), this.pickOpp(['RB', 'LB'])];
+    const zs = [zl - 7.2, zl + 7.2, zl - 7.2 - rand(9, 11), zl + 7.2 + rand(9, 11)];
+    dl.forEach((o, i) => { this.put(o, xl, zs[i]); this.pinned.add(o); });
 
     // the full-back who steps up on the viewer, on the far side of him from the through ball
     const pr = this.pickOpp(['LM', 'RM', 'LCM', 'RCM']);
-    const hl = heading(U, { x: xl + 9, z: zl + (end.z - zl) * 0.3 }), pa = hl + rsn * 130 * DEG, pd = 4 + this.reach() * rand(0.45, 0.7);
-    const pp = { x: ux + Math.sin(pa) * pd, z: uz + Math.cos(pa) * pd };
+    const hl = heading(U, { x: xl + 9, z: zl + (end.z - zl) * 0.3 }), pdeg = rand(85, 100) * DEG, pd = 4 + this.reach() * rand(0.45, 0.7);
+    // beside him, on the side away from the runner's start and clear of the way back
+    const at = (sg) => ({ x: ux + Math.sin(hl + sg * pdeg) * pd, z: uz + Math.cos(hl + sg * pdeg) * pd });
+    const pp = dist2(at(1), start) > dist2(at(-1), start) ? at(1) : at(-1);
     this.put(pr, pp.x, pp.z);
     this.pinned.add(pr);
     this.stalk.set(pr, new THREE.Vector3(pp.x - ux, 0, pp.z - uz));
 
     this.fillRest(ux, uz * 0.5);
     this.keepArea(ux, uz, 7.5);
-    const lead0 = { x: ux + 17, z: uz + (end.z - uz) * 17 / (end.x - ux) };
+    const lead0 = { x: ux + 17, z: start.z + (end.z - start.z) * (ux + 17 - sx) / (ex - sx) }; // where the ball goes, about
     this.keepLane(U, lead0, 2.4);
+    this.keepLane(U, { x: cx, z: cz }, 1.9); // the way back to the man who played it: recycling must be on
     this.keepSeg(start, end, 9.6);
     this.rules.push(() => this.clearMatesSeg(start, end, 4.5));
     this.clearMatesSeg(start, end, 4.5);
+    // nobody else is deeper than the back four, even after the step: the line is the offside line
+    this.capX = xl - step - 2.6;
+    this.rules.push(() => this.keepUpfield());
     this.chainTo(carrier, Math.round(rand(d.passes[0], d.passes[1])));
 
     this.passer = carrier; this.runner = runner; this.marker = pr; this.line = dl;
+    this.xl = xl; this.step = step; this.runDelay = T - runFor; this.passOffside = null;
     this.S = start; this.E = end;
     const len = dist2(start, end) || 1;
     this.runDir = { x: (end.x - start.x) / len, z: (end.z - start.z) / len };
-    this.runV = 6.5 * this.speed;
+    this.runV = runV;
     this.runStarted = false;
     this.free = runner; this.pressers = [pr];
-    this.watch = { runner: { p: runner, when: () => this.runStarted }, line: { p: dl[1] } };
+    this.watch = { runner: { p: runner, when: () => this.finalStruck }, line: { p: dl[1] }, line2: { p: dl[0] } };
   }
+
+  // unscripted outfield opposition sit upfield of capX; one pushed back finds the nearest clear spot along the
+  // line, outside the viewer's circle and off everybody else
+  keepUpfield() {
+    const U = this.U, all = [...this.home.filter((p) => p !== this.userBody), ...this.away];
+    for (const o of this.movable()) {
+      if (o.pos.x <= this.capX) continue;
+      const x = this.capX - rand(0, 0.6), dx = x - U.x, z0 = o.pos.z, sg = z0 >= U.z ? 1 : -1;
+      const clear = (z) => Math.abs(z) <= 32 && Math.hypot(dx, z - U.z) >= 7.8 && all.every((q) => q === o || Math.hypot(q.pos.x - x, q.pos.z - z) >= 1.9);
+      let z = z0;
+      for (let j = 0; j < 80 && !clear(z); j++) z = z0 + (j % 2 ? -sg : sg) * Math.ceil((j + 1) / 2) * 0.9;
+      this.put(o, x, z);
+    }
+  }
+
+  afterSeal() { this.keepUpfield(); this.clearLane(this.U, this.passer.pos, 1.9); }
+
+  onFinal() { this.runAt = this.strikeAt + this.runDelay; }
 
   script(dt, user) {
     const r = this.runner;
-    if (!this.runStarted && this.state === 'incoming' && this.t - this.strikeAt >= 0.25) {
+    if (!this.runStarted && this.state === 'incoming' && this.runAt != null && this.t >= this.runAt) {
       this.runStarted = true;
       this.events.push({ t: this.t, type: 'run' });
     }
@@ -1468,29 +1547,87 @@ export class ThroughScenario extends ThirdManScenario {
       r.target.set(this.E.x, 0, this.E.z);
       r.maxSpeed = this.runV;
     }
-    // the line steps up together, a few metres, as the ball comes
+    // the back four step up together, a flat line, as the ball comes
     if (this.finalStruck && this.t - this.strikeAt >= 0.2) {
       for (const o of this.line) {
         if (this.state === 'outcome' && this.outcomeTarget === o) continue;
-        const b = this.base.get(o);
-        o.target.set(b.x - 3.5, 0, b.z);
+        o.target.set(this.xl - this.step, 0, this.base.get(o).z);
         o.maxSpeed = 4.5 * this.speed;
       }
     }
     if (!this.closeIn(this.marker, user, 3.0, 2.2)) this.stalkUser(this.marker, user, 4);
   }
 
+  // where the runner is tau seconds from now (he may not have started yet)
+  runnerAt(tau, out) {
+    const wait = this.runStarted || this.runAt == null ? 0 : Math.max(0, this.runAt - this.t);
+    const r = this.runner, rem = dist2(r.pos, this.E), k = Math.min(rem, this.runV * Math.max(0, tau - wait));
+    out.x = r.pos.x + this.runDir.x * k;
+    out.z = r.pos.z + this.runDir.z * k;
+    return out;
+  }
+
+  // The offside line is the second-last opponent: the deepest outfield man (the keeper is last). The runner is
+  // offside when he is beyond it, and beyond the ball, as the pass is played (a quarter metre's benefit of the doubt).
+  offsideState() {
+    const line = offsideLine(this.away), x = this.runner.pos.x;
+    return { line, runnerX: x, margin: x - line, offside: x - line > 0.25 && x > this.world.ball.pos.x };
+  }
+
+  execute(choice, oneTouch) {
+    if (!this.passOffside) this.passOffside = this.offsideState();
+    super.execute(choice, oneTouch);
+    if (this.passOffside.offside && choice.kind === 'pass' && choice.target === this.runner) {
+      // flagged: the ball goes to the line's keeper of the free kick
+      this.outcome = 'intercepted';
+      this.outcomeTarget = this.line.slice().sort((a, b) => dist2(a.pos, this.runner.pos) - dist2(b.pos, this.runner.pos))[0];
+      this.events.push({ t: this.t, type: 'offside' });
+      this.fx.whistle?.();
+    }
+  }
+
+  offsideNow() { return (this.passOffside ?? this.offsideState()).offside; }
+
+  answer() { return this.offsideNow() ? { target: this.passer, one: false, offside: true } : { target: this.runner, one: true }; }
+  wrongs() { return this.offsideNow() ? [this.runner] : [this.passer]; }
+
+  valueOf(o) {
+    if (o.kind !== 'pass') return -0.3;
+    if (this.offsideNow()) {
+      if (o.target === this.runner) return -o.value - 0.25; // flagged: worth less than nothing
+      return o.target === this.passer ? BONUS : 0; // recycling is the answer; any other safe ball is fine
+    }
+    return o.target === this.runner ? BONUS : -0.2;
+  }
+
   describe(r) {
     const ch = this.chosen?.target, toRunner = ch === this.runner;
-    const seen = !!this.saw.runner, quick = (this.touchDelay ?? 9) <= 1.0;
+    const seen = !!this.saw.runner, seenLine = !!(this.saw.line || this.saw.line2);
+    const quick = (this.touchDelay ?? 9) <= 1.0;
     const lead = this.leadErr;
+    const o = this.passOffside;
+    const kept = ['completed', 'tight', 'goal'].includes(r.outcome);
     r.runnerSeen = seen;
+    r.lineSeen = seenLine;
     r.quick = quick;
     r.leadErr = lead;
+    r.offside = o ? o.offside : null;
+    r.offsideMargin = o ? o.margin : null;
+    r.lineStep = this.step;
+    if (o?.offside) {
+      // the line caught him: a pass to him is wrong, a recycled ball is a valid answer
+      r.correct = !!ch && !toRunner && kept;
+      r.fact = !toRunner && r.correct ? 'OFFSIDE RUN · RECYCLED' : 'OFFSIDE';
+      r.expected = 'NOT ON · RECYCLE';
+      r.reason = `OFFSIDE BY ${f1(Math.min(o.margin, 9.9))} M · RECYCLE`;
+      r.scenarioScore = toRunner ? (seenLine ? 15 : 0) : r.correct ? 50 + (seenLine ? 30 : 0) + (quick ? 20 : 0) : (seenLine ? 25 : 10);
+      return;
+    }
     r.correct = toRunner && lead != null && lead <= 1.5 && quick;
     r.fact = !toRunner ? 'RUNNER MISSED' : lead == null ? 'PASS LOST' : lead <= 1.5 ? `THROUGH BALL ${f1(lead)} M` : `OFF THE RUN ${f1(lead)} M`;
     r.expected = 'THROUGH BALL INTO THE RUN';
-    r.scenarioScore = (seen ? 25 : 0) + (quick && toRunner ? 25 : 0) + (toRunner && lead != null ? Math.round(50 * clamp(1 - lead / 3.5, 0, 1)) : 0);
+    r.reason = o ? `ONSIDE BY ${f1(Math.min(-o.margin, 9.9))} M · THROUGH BALL` : 'ONSIDE · THROUGH BALL';
+    r.scenarioScore = (seen ? 25 : 0) + (quick && toRunner ? 25 : 0) + (toRunner && lead != null ? Math.round(50 * clamp(1 - lead / 2.5, 0, 1)) : 0);
   }
 }
 
@@ -1600,6 +1737,7 @@ export class GkBuildScenario extends Scenario {
     r.sawPressers = !!this.saw.press && (!this.both || !!this.saw.press2);
     r.fact = both ? 'BOTH CENTRE BACKS SHUT' : 'ONE CENTRE BACK SHUT';
     r.expected = both ? 'GO LONG' : 'PLAY TO THE OPEN SIDE';
+    r.reason = `${r.fact} · ${r.expected}`;
     r.scenarioScore = r.correct ? (r.sawPressers ? 100 : 65) : (r.sawPressers ? 30 : 0);
   }
 }

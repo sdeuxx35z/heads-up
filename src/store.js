@@ -4,7 +4,7 @@ const KEY = 'headsup.v1';
 const PROFILE_COLORS = ['#ff7a1a', '#4fd88a', '#5aa9ff'];
 
 function blankProfile(i) {
-  return { name: `PLAYER ${i + 1}`, number: [8, 10, 6][i], color: PROFILE_COLORS[i], stars: Array(24).fill(0), best: Array(24).fill(0), passed: Array(24).fill(false), dailies: [], sessions: [] };
+  return { name: `PLAYER ${i + 1}`, number: [8, 10, 6][i], color: PROFILE_COLORS[i], stars: Array(24).fill(0), best: Array(24).fill(0), passed: Array(24).fill(false), fails: Array(24).fill(0), dailies: [], sessions: [] };
 }
 
 function load() {
@@ -12,7 +12,7 @@ function load() {
     const raw = JSON.parse(localStorage.getItem(KEY));
     if (raw && Array.isArray(raw.profiles)) {
       // profiles saved before the learning career get the new fields
-      raw.profiles = raw.profiles.map((p, i) => ({ ...blankProfile(i), ...p, passed: p.passed || Array(24).fill(false), dailies: p.dailies || [] }));
+      raw.profiles = raw.profiles.map((p, i) => ({ ...blankProfile(i), ...p, passed: p.passed || Array(24).fill(false), fails: p.fails || Array(24).fill(0), dailies: p.dailies || [] }));
       return raw;
     }
   } catch {}
@@ -32,6 +32,13 @@ export const store = {
   get settings() { return this.data.settings; },
   setActive(i) { this.data.active = i; this.save(); },
   unlocked(level) { return level === 0 || !!this.profile.passed[level - 1] || !!this.profile.passed[level]; },
+  // after three tries a lesson can be skipped; it opens the next one but earns no stars
+  skipLesson(level) {
+    const p = this.profile;
+    p.passed[level] = true;
+    p.fails[level] = 0;
+    this.save();
+  },
   starsFor(score) { return STAR_LINES.filter((s) => score >= s).length; },
 
   recordSession(s) {
@@ -43,11 +50,13 @@ export const store = {
       if (s.objective?.passed) {
         p.passed[s.level] = true;
         p.stars[s.level] = Math.max(p.stars[s.level], Math.max(1, this.starsFor(s.score)));
-      }
+        p.fails[s.level] = 0;
+      } else if (s.objective) p.fails[s.level] = (p.fails[s.level] || 0) + 1;
       p.best[s.level] = Math.max(p.best[s.level], s.score);
     }
     if (s.daily) {
-      const day = new Date(s.date).toISOString().slice(0, 10);
+      const d = new Date(s.date);
+      const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
       if (!p.dailies.includes(day)) p.dailies.push(day);
       if (p.dailies.length > 400) p.dailies.shift();
     }

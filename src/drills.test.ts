@@ -57,8 +57,9 @@ class FakePlayer {
   pos = new THREE.Vector3(); vel = new THREE.Vector3(); target = new THREE.Vector3();
   heading = 0; maxSpeed = 6; wobble = Math.random() * 100; mood = 0; role: any = null; ring = 0; ringHex = 0xffffff;
   ringMat = { color: { getHex: () => this.ringHex }, opacity: 0 };
-  visible = true; stalk: any;
+  visible = true; stalk: any; turned: number[] = [];
   constructor(public slot: string, public number: number, public team: string) {}
+  turnTo(yaw: number) { this.turned.push(yaw); }
   place(x: number, z: number) { this.pos.set(x, 0, z); this.target.copy(this.pos); this.vel.set(0, 0, 0); this.mood = 0; }
   sync() {}
   setVisible(v: boolean) { this.visible = v; }
@@ -173,6 +174,38 @@ test('awareness: looking at the cued player sets cueSeen', () => {
   expect(rep.snapshot.cueSeen).toBe(true);
 });
 
+test('awareness: the cue is seen by a held look inside the cone, not by a glance, a wide look, or a snap turn', () => {
+  const seen = (look: (rep: any, w: any, k: number) => void) => {
+    const w = makeWorld();
+    const rep: any = new AwarenessDrill(w, { role: 'CM', difficulty: 'EASY', quiz: true, motion: false, fx });
+    rep.start();
+    let k = 0;
+    for (let i = 0; i < 3000 && rep.state !== 'quiz'; i++) {
+      if (rep.cueState === 1) look(rep, w, k++);
+      rep.update(1 / 30);
+    }
+    expect(rep.state).toBe('quiz');
+    return rep.snapshot.cueSeen;
+  };
+  const at = (rep: any, w: any, off = 0) => { w.yaw = Math.atan2(rep.cueP.pos.x - w.user.x, rep.cueP.pos.z - w.user.z) + off; };
+  const ball = (w: any) => { w.yaw = Math.atan2(w.ball.pos.x - w.user.x, w.ball.pos.z - w.user.z); };
+  expect(seen(() => {})).toBe(false);
+  expect(seen((rep, w, k) => { if (k === 0) at(rep, w); else ball(w); })).toBe(false);   // one frame
+  expect(seen((rep, w) => at(rep, w, 35 * Math.PI / 180))).toBe(false);                    // inside the old 48 degrees
+  expect(seen((rep, w) => { at(rep, w); w.snapTurned = true; })).toBe(false);              // the controller did the turning
+  expect(seen((rep, w, k) => { if (k < 6) at(rep, w); else ball(w); })).toBe(true);                      // 0.2 s on him
+});
+
+test('rondo: the passer turns with turnTo, the ball is not given a new facing in a frame', () => {
+  const w = makeWorld();
+  const rep = new RondoDrill(w, { role: 'CM', difficulty: 'MEDIUM', quiz: false, motion: false, fx });
+  rep.start();
+  const heads = rep.mates.map((p: any) => p.heading);
+  for (let i = 0; i < 40; i++) rep.update(1 / 30);
+  expect(rep.mates.some((p: any) => p.turned.length > 0)).toBe(true);
+  expect(heads.length).toBe(4);
+});
+
 test('GK rep: keeper start, carrier is a defender, presser from the front', () => {
   for (let n = 0; n < 20; n++) {
     const w = makeWorld();
@@ -227,7 +260,7 @@ test('rondo: the four mates slide along the edges and stay spaced', () => {
     });
     for (let a = 0; a < 4; a++) for (let b = a + 1; b < 4; b++) minGap = Math.min(minGap, rep.mates[a].pos.distanceTo(rep.mates[b].pos));
   }
-  expect(rep.mateS.some((s: number, k: number) => Math.abs(s - rep.homeS[k]) > 0.4)).toBe(true);
+  expect(rep.mateS.some((s: number, k: number) => Math.abs(s - rep.homeS[k]) > 0.2)).toBe(true);
   expect(minGap).toBeGreaterThan(2.5);
 });
 

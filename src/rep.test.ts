@@ -4,7 +4,9 @@ import {
   Rep, timingScore, classifyCritical, criticalScore, scanRate10, rateScore, bodyShape, informationScore, scanComposite,
   speedFactor, totalScore, offsideLine, PAR, AWARE_BONUS,
 } from './rep.js';
-import { evaluateOptions, passProbability, shotXG, shotAim, scoreDecision, laneMargin, linesBroken, GAIN_FLOOR } from './eval.js';
+import {
+  evaluateOptions, passProbability, shotXG, shotAim, scoreDecision, laneMargin, linesBroken, GAIN_FLOOR, turnoverLoss, LOSS_OWN, LOSS_ATT,
+} from './eval.js';
 import { ROLES, AWAY_442, DIFFICULTY } from './config.js';
 
 const DEG = Math.PI / 180;
@@ -80,7 +82,7 @@ test('rate score: 100 at par, linear to 0; par table', () => {
   expect(rateScore(2.5, 5)).toBe(50);
   expect(rateScore(0, 5)).toBe(0);
   expect(rateScore(null, 5)).toBeNull();
-  expect(PAR).toEqual({ CM: 5, CDM: 5, CB: 4.5, W: 4, CAM: 4, FB: 3.5, ST: 3, GK: 4.5 });
+  expect(PAR).toEqual({ CM: 5, CDM: 5, CB: 4.5, W: 4, CAM: 4, FB: 3.5, ST: 3, GK: 3 });
 });
 
 test('body shape: half-turn, open, closed', () => {
@@ -161,14 +163,62 @@ test('pComplete: 50% at 0.3 m, 90% at 1.5 m, monotonic', () => {
   expect(passProbability(Infinity)).toBe(1);
 });
 
-test('value = pComplete x gain; a tighter lane is worth less', () => {
+test('value = p x gain - (1 - p) x loss(ball.x); a tighter lane is worth less', () => {
   const ball = { x: 0, y: 0, z: 0 };
   const mate = O(14, 0);
   const wide = evaluateOptions(ball, [mate], [O(14, 12, 'RB')], 'mid');
   const tight = evaluateOptions(ball, [mate], [O(14, 2.6, 'RB')], 'mid');
-  expect(wide[0].value).toBeCloseTo(wide[0].pComplete * wide[0].gain, 9);
+  for (const o of [wide[0], tight[0]]) expect(o.value).toBeCloseTo(o.pComplete * o.gain - (1 - o.pComplete) * turnoverLoss(0), 9);
   expect(tight[0].pComplete).toBeLessThan(wide[0].pComplete);
   expect(tight[0].value).toBeLessThan(wide[0].value);
+});
+
+test('turnover cost: 0.5 near your own box, 0.15 in the attacking third, interpolated on ball x', () => {
+  expect(turnoverLoss(-52)).toBeCloseTo(LOSS_OWN, 9);
+  expect(turnoverLoss(-36)).toBeCloseTo(LOSS_OWN, 9);
+  expect(turnoverLoss(17.5)).toBeCloseTo(LOSS_ATT, 9);
+  expect(turnoverLoss(45)).toBeCloseTo(LOSS_ATT, 9);
+  expect(turnoverLoss(-9.25)).toBeCloseTo((LOSS_OWN + LOSS_ATT) / 2, 6);
+  let prev = 1;
+  for (let x = -50; x <= 50; x += 5) { const l = turnoverLoss(x); expect(l).toBeLessThanOrEqual(prev); prev = l; }
+});
+
+test('a 49% forward ball from a centre back no longer beats a 99% safe pass; in the attacking third it still does', () => {
+  // the opponent sits so the forward lane's margin is just under 0.3 m (p about 0.49); the sideways ball is wide open
+  // a defender 4.19 m off the line at its middle: reach 3.91 m, margin 0.28 m, p about 0.49
+  const mkOpps = (bx: number) => [O(bx + 12, 4.19, 'RM'), O(bx + 12, 40, 'LM')];
+  const forward = (bx: number) => ({ pos: new THREE.Vector3(bx + 25, 0, 0), slot: 'ST', vel: new THREE.Vector3() });
+  const side = (bx: number) => ({ pos: new THREE.Vector3(bx, 0, 18), slot: 'RCB', vel: new THREE.Vector3() });
+  const eval1 = (bx: number, group: string) => {
+    const opts = evaluateOptions({ x: bx, y: 0, z: 0 }, [forward(bx), side(bx)], mkOpps(bx), group);
+    return { f: opts.find((o: any) => o.target.slot === 'ST'), s: opts.find((o: any) => o.target.slot === 'RCB'), opts };
+  };
+  const cb = eval1(-35, 'def');
+  expect(cb.f.pComplete).toBeGreaterThan(0.35);
+  expect(cb.f.pComplete).toBeLessThan(0.65);
+  expect(cb.s.pComplete).toBeGreaterThan(0.97);
+  expect(cb.f.value).toBeLessThan(cb.s.value);       // a coin flip from your own box loses to the safe ball
+  expect(cb.opts[0].target.slot).toBe('RCB');
+  // the same two balls from the attacking third: losing it costs little, so the coin flip is right
+  const att = eval1(20, 'att');
+  expect(att.f.value).toBeGreaterThan(att.s.value);
+  // 99% of the time a safe pass is worth gain x p, not less than nothing
+  expect(cb.s.value).toBeGreaterThan(0);
+});
+
+test('a pass that costs more than it gains is negative, scores 0, and the best of bad options still scores 100', () => {
+  const bad = evaluateOptions({ x: -40, y: 0, z: 0 }, [{ pos: new THREE.Vector3(-14, 0, 0), slot: 'ST', vel: new THREE.Vector3() }], [O(-27, 0, 'RM')], 'def')[0];
+  expect(bad.value).toBeLessThan(0);
+  const ok = { kind: 'pass', value: 0.3 };
+  expect(scoreDecision(bad, [ok, bad])).toBe(0);
+  const o = (value: number) => ({ kind: 'pass', value });
+  const allBad = [o(-0.05), o(-0.2), o(-0.6)];
+  expect(scoreDecision(allBad[0], allBad)).toBe(100);
+  expect(scoreDecision(allBad[1], allBad)).toBe(63);
+  expect(scoreDecision(allBad[2], allBad)).toBe(0);
+  // a choice that is not on the list (a pass that was never offered) cannot score above half when everything is bad
+  expect(scoreDecision({ kind: 'pass', value: 0 }, allBad)).toBeLessThanOrEqual(50);
+  for (const sc of [scoreDecision(allBad[1], allBad), scoreDecision(bad, [ok, bad])]) { expect(sc).toBeGreaterThanOrEqual(0); expect(sc).toBeLessThanOrEqual(100); }
 });
 
 test('progression is dx/25: backwards is allowed but a safe recycle keeps a small positive gain', () => {
@@ -288,8 +338,9 @@ class FakePlayer {
   pos = new THREE.Vector3(); vel = new THREE.Vector3(); target = new THREE.Vector3();
   heading = 0; maxSpeed = 6; wobble = Math.random() * 100; mood = 0; role: any = null; ring = 0; ringHex = 0xffffff;
   ringMat = { color: { getHex: () => this.ringHex }, opacity: 0 };
-  visible = true; stalk: any; pressV = 0;
+  visible = true; stalk: any; pressV = 0; turned: number[] = [];
   constructor(public slot: string, public number: number, public team: string) {}
+  turnTo(yaw: number) { this.turned.push(yaw); }
   place(x: number, z: number) { this.pos.set(x, 0, z); this.target.copy(this.pos); this.vel.set(0, 0, 0); this.mood = 0; }
   sync() {}
   setVisible(v: boolean) { this.visible = v; }
@@ -505,14 +556,17 @@ test('speed scalar stretches the window and the flight', () => {
     rep.start();
     let g = 0;
     while (rep.state !== 'decide' && g++ < 6000) { watchBall(rep, w); rep.update(1 / 60); }
-    const expected = (DIFFICULTY.HARD.window + (rep.knewPressure ? AWARE_BONUS : 0)) / speed;
-    return { window: rep.window, expected, flight: rep.finalFlight };
+    // the difficulty's window (and the awareness bonus) is the ceiling; a presser close at the touch shortens it
+    const cap = (DIFFICULTY.HARD.window + (rep.knewPressure ? AWARE_BONUS : 0)) / speed;
+    const floor = 0.5 + (rep.knewPressure ? AWARE_BONUS : 0) / speed; // half a second of real time, plus the bonus scaled
+    return { window: rep.window, cap, floor, flight: rep.finalFlight, same: rep.decisionWindow(rep.m.presserDist, rep.knewPressure) };
   };
   const slow = run(0.5), norm = run(1), fast = run(1.2);
-  expect(slow.window).toBeCloseTo(slow.expected, 6);
-  expect(norm.window).toBeCloseTo(norm.expected, 6);
-  expect(fast.window).toBeCloseTo(fast.expected, 6);
-  expect(slow.window).toBeGreaterThan(fast.window * 1.5);
+  for (const r of [slow, norm, fast]) {
+    expect(r.window).toBeLessThanOrEqual(r.cap + 1e-9);
+    expect(r.window).toBeGreaterThanOrEqual(Math.min(r.floor, r.cap) - 1e-9);
+    expect(r.window).toBeCloseTo(r.same, 9);
+  }
   // the ball is slower at half speed: the flight in game time never drops below minFlight
   expect(slow.flight * 0.5).toBeGreaterThanOrEqual(1.0 - 0.05);
   expect(norm.flight).toBeGreaterThanOrEqual(1.0 - 0.05);
@@ -622,7 +676,7 @@ test('free teammate: any direction, and sometimes nobody', () => {
 
 test('sawFree is only false when the top-ranked option went unseen', () => {
   let seenTrue = 0, seenFalse = 0;
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < 30; i++) {
     const w = makeWorld();
     const rep = new Rep(w, { role: 'CM', difficulty: 'EASY', quiz: false, motion: false, fx: fx() });
     rep.freeChance = 1;
@@ -705,9 +759,59 @@ test('cheers for tight completions, groans for interceptions, nothing for a lost
   const w = makeWorld();
   const rep = new Rep(w, { role: 'CM', difficulty: 'EASY', quiz: false, motion: false, fx: fx(log) });
   rep.start();
-  rep.outcome = 'tight'; rep.options = []; rep.chosen = null; rep.decisionScore = 50; rep.state = 'outcome';
+  rep.outcome = 'tight'; rep.options = []; rep.chosen = null; rep.decisionScore = 100; rep.state = 'outcome';
   rep.finish();
   expect(log).toEqual(['cheer0.7']);
+  // the crowd follows the quality of the decision, not just the result
+  const log2: string[] = [];
+  const rep2 = new Rep(makeWorld(), { role: 'CM', difficulty: 'EASY', quiz: false, motion: false, fx: fx(log2) });
+  rep2.start();
+  rep2.outcome = 'tight'; rep2.options = []; rep2.chosen = null; rep2.decisionScore = 50; rep2.state = 'outcome';
+  rep2.finish();
+  expect(log2).toEqual(['cheer' + 0.7 * (0.4 + 0.6 * 0.5)]);
+});
+
+test('decision window: a presser at 1.2 m tackles at once, a far one leaves the difficulty window, seeing him adds time', () => {
+  const w = makeWorld();
+  const rep: any = new Rep(w, { role: 'CM', difficulty: 'MEDIUM', quiz: false, motion: false, fx: fx() });
+  rep.start();
+  const u = w.userPos(), presser = rep.pressers[0];
+  const win = (d: number, v = 0, aware = false) => { presser.pos.set(u.x + d, 0, u.z); presser.pressV = v; return rep.decisionWindow(d, aware); };
+  const cap = DIFFICULTY.MEDIUM.window, v0 = DIFFICULTY.MEDIUM.presserSpeed * 0.6;
+  expect(win(1.2)).toBeCloseTo(0.5, 9);                       // (1.2 - 0.8) / 3.7 is a tenth of a second: the floor
+  expect(win(3)).toBeCloseTo((3 - 0.8) / v0, 9);
+  expect(win(3)).toBeLessThan(win(6));
+  expect(win(6)).toBeLessThan(win(9));
+  expect(win(60)).toBeCloseTo(cap, 9);                        // never longer than the difficulty's window
+  expect(win(8, 9)).toBeLessThan(win(8, 0));                  // a presser already running at 9 m/s leaves less
+  expect(win(1.2, 0, true)).toBeCloseTo(0.5 + AWARE_BONUS, 9);
+  expect(rep.decisionWindow(null, false)).toBeCloseTo(cap, 9);
+  // a slower game gives more time, scaled
+  const slow: any = new Rep(makeWorld(), { role: 'CM', difficulty: 'MEDIUM', quiz: false, motion: false, fx: fx(), speed: 0.5 });
+  slow.start();
+  expect(slow.decisionWindow(null, false)).toBeCloseTo(cap / 0.5, 9);
+});
+
+test('decision window: with the presser at 1.2 m at the touch the ball is lost inside a second, not after 1.9', () => {
+  const w = makeWorld();
+  const rep: any = new Rep(w, { role: 'CM', difficulty: 'MEDIUM', quiz: false, motion: false, fx: fx() });
+  rep.minFlight = 1.0;
+  rep.start();
+  let g = 0;
+  while (rep.state !== 'decide' && g++ < 6000) {
+    watchBall(rep, w);
+    // he is on the viewer's shoulder when the ball arrives
+    if (rep.state === 'incoming' && w.ball.flight && w.ball.flight.t > w.ball.flight.dur - 0.1) {
+      const u = w.userPos(); rep.pressers[0].pos.set(u.x + 1.2, 0, u.z); rep.pressers[0].target.copy(rep.pressers[0].pos);
+    }
+    rep.update(1 / 60);
+  }
+  expect(rep.state).toBe('decide');
+  expect(rep.m.presserDist).toBeLessThan(1.6);
+  expect(rep.window).toBeLessThan(1.0);
+  while (rep.state === 'decide' && g++ < 9000) { watchBall(rep, w); rep.update(1 / 60); }
+  expect(rep.outcome).toBe('lost');
+  expect(rep.decideTime).toBeLessThan(1.0);
 });
 
 // --- scenario hooks (S2 contract) -------------------------------------------------------------
@@ -749,4 +853,125 @@ test('no wall clock anywhere in a rep', () => {
   (performance as any).now = () => { throw new Error('wall clock'); };
   try { for (let i = 0; i < 400; i++) { watchBall(rep, w); rep.update(1 / 30); if (rep.state === 'decide') break; } } finally { Date.now = real; (performance as any).now = pn; }
   expect(rep.t).toBeGreaterThan(1);
+});
+
+// --- round 3 fixes -----------------------------------------------------------------------------
+
+test('the kicker turns with turnTo, his heading is never written in one frame', () => {
+  const w = makeWorld();
+  const rep: any = new Rep(w, { role: 'CM', difficulty: 'MEDIUM', quiz: false, motion: false, fx: fx() });
+  rep.start();
+  const from = rep.carrier, h0 = from.heading, user = w.userPos();
+  rep.passesLeft = 5;
+  rep.nextPass(user);
+  const to = rep.receiver;
+  expect(from.heading).toBe(h0);
+  expect(from.turned.length).toBe(1);
+  expect(from.turned[0]).toBeCloseTo(Math.atan2(to.pos.x - from.pos.x, to.pos.z - from.pos.z), 9);
+  // the last pass, to the viewer
+  w.ball.flight = null;
+  rep.carrier = to; rep.passesLeft = 1;
+  const h1 = to.heading;
+  rep.nextPass(user);
+  expect(to.heading).toBe(h1);
+  expect(to.turned.length).toBe(1);
+  expect(to.turned[0]).toBeCloseTo(Math.atan2(user.x - to.pos.x, user.z - to.pos.z), 9);
+});
+
+test('the kick sound waits for the boot: it plays flight.wait after the kick, in sim time', () => {
+  const w = makeWorld();
+  const heard: { t: number; v: number }[] = [];
+  const rep: any = new Rep(w, { role: 'CM', difficulty: 'MEDIUM', quiz: false, motion: false, fx: { kick: (v: number) => heard.push({ t: rep.t, v }) } });
+  const kicks: number[] = [];
+  const real = w.ball.kick.bind(w.ball);
+  w.ball.kick = (a: any, b: any, sp: number, loft = 0) => { real(a, b, sp, loft); w.ball.flight.wait = 0.16; kicks.push(rep.t); };
+  rep.start();
+  let g = 0;
+  while (kicks.length < 2 && g++ < 2000) { watchBall(rep, w); rep.update(1 / 120); }
+  expect(kicks.length).toBeGreaterThanOrEqual(2);
+  // at the moment of the second kick nothing has sounded for it yet; 0.16 s later it has
+  const n = heard.length;
+  expect(n).toBeLessThanOrEqual(1);
+  for (let i = 0; i < 40; i++) { watchBall(rep, w); rep.update(1 / 120); }
+  expect(heard.length).toBeGreaterThan(n - 1);
+  for (let k = 0; k < Math.min(heard.length, kicks.length); k++) {
+    expect(heard[k].t - kicks[k]).toBeGreaterThanOrEqual(0.16 - 1 / 120 - 1e-6);
+    expect(heard[k].t - kicks[k]).toBeLessThan(0.16 + 1 / 60);
+  }
+  // a kick with no wait (the viewer's own boot is invisible) sounds at once
+  const log: number[] = [];
+  const rep2: any = new Rep(makeWorld(), { role: 'CM', difficulty: 'MEDIUM', quiz: false, motion: false, fx: { kick: (v: number) => log.push(v) } });
+  rep2.start();
+  rep2.kickSound(1, 0);
+  rep2.kickSound(0.5, undefined);
+  expect(log).toEqual([1, 0.5]);
+});
+
+test('the viewer\'s own pass sounds once, with the ball, after the boot', () => {
+  const w = makeWorld();
+  const heard: number[] = [];
+  const rep: any = new Rep(w, { role: 'CM', difficulty: 'EASY', quiz: false, motion: false, fx: { kick: (v: number) => heard.push(v) } });
+  rep.start();
+  let g = 0;
+  while (rep.state !== 'decide' && g++ < 6000) { watchBall(rep, w); rep.update(1 / 60); }
+  const before = heard.length;
+  const t = rep.evaluate(w.ball.pos)[0].target;
+  const o = w.user.clone(); o.y = 1.6;
+  rep.aim(o, new THREE.Vector3(t.pos.x, 1, t.pos.z).sub(o).normalize()); rep.select();
+  expect(heard.length).toBe(before + 1);
+  expect(heard[heard.length - 1]).toBe(1);
+});
+
+test('smoothedYaw can leave out the last moments before the touch', () => {
+  const w = makeWorld();
+  const rep: any = new Rep(w, { role: 'CM', difficulty: 'EASY', quiz: false, motion: false, fx: fx() });
+  rep.start();
+  rep.initMetrics();
+  const push = (yaw: number, n: number) => { for (let i = 0; i < n; i++) { rep._ry[rep._rh] = yaw; rep._rd[rep._rh] = 1 / 60; rep._rh = (rep._rh + 1) % 512; rep._rn++; } };
+  push(0.5, 60);   // a second looking one way
+  push(2.0, 15);   // the last quarter second: eyes somewhere else
+  expect(rep.smoothedYaw(0.5)).toBeGreaterThan(0.8);
+  expect(rep.smoothedYaw(0.5, 0.25)).toBeCloseTo(0.5, 3);
+  expect(rep.smoothedYaw(0.3, 0.25)).toBeCloseTo(0.5, 3);
+});
+
+test('body shape ignores eyes swung off the ball in the last 0.25 s before the touch', () => {
+  const body = (swing: boolean) => {
+    const w = makeWorld();
+    const rep: any = new Rep(w, { role: 'CM', difficulty: 'MEDIUM', quiz: false, motion: false, fx: fx() });
+    rep.minFlight = 1.2;
+    play(rep, w, (r, ww) => {
+      const f = ww.ball.flight;
+      const late = r.state === 'incoming' && f && f.dur - f.t < 0.2;
+      ww.yaw = bearing(ww, r.passer ? r.passer.pos : ww.ball.pos) + (swing && late ? 90 * DEG : 0); // on the man who played it
+    }, { release: 'first' });
+    return rep.result.body;
+  };
+  expect(body(false)).toBe('CLOSED');          // watching the passer square on
+  expect(body(true)).toBe('CLOSED');           // the glance at the touch is not a half-turn
+});
+
+test('snapThisFrame is raised on the frame a snap turn is read and cleared on the next', () => {
+  const w = makeWorld();
+  const rep: any = new Rep(w, { role: 'CM', difficulty: 'EASY', quiz: false, motion: false, fx: fx() });
+  rep.start();
+  watchBall(rep, w); rep.update(1 / 60);
+  expect(rep.snapThisFrame).toBe(false);
+  w.snapTurned = true; w.yaw += 0.5; rep.update(1 / 60);
+  expect(rep.snapThisFrame).toBe(true);
+  expect(w.snapTurned).toBe(false);
+  rep.update(1 / 60);
+  expect(rep.snapThisFrame).toBe(false);
+});
+
+test('the gaze trackers do not credit the frame a snap turn swung the view onto a player', () => {
+  const w = makeWorld();
+  const rep: any = new Rep(w, { role: 'CM', difficulty: 'EASY', quiz: false, motion: false, fx: fx() });
+  rep.start();
+  const mate = rep.mates.find((m: any) => m.slot !== 'GK' && m !== rep.carrier);
+  const idx = rep.mates.indexOf(mate);
+  for (let i = 0; i < 30; i++) { w.yaw = bearing(w, mate.pos); w.snapTurned = true; rep.update(1 / 60); }
+  expect(rep.sawMate[idx]).toBeLessThan(0);
+  for (let i = 0; i < 30; i++) { w.yaw = bearing(w, mate.pos); rep.update(1 / 60); }
+  expect(rep.sawMate[idx]).toBeGreaterThan(0);
 });

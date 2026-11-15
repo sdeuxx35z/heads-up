@@ -10,12 +10,32 @@ import { store } from './store.js';
 import { CAREER } from './config.js';
 import * as S from './screens.js';
 import { makeQuiz, quizScreen } from './quiz.js';
-import { sessionMetrics, checkObjective, nextLesson, dailyDrill, weakSpot } from './career.js';
+import { sessionMetrics, checkObjective, nextLesson, dailyDrill, weakSpot, currentLevel, rating, streak, unlockedDrills } from './career.js';
 
 const DESK_EYE = 1.7;
 const _v1 = new THREE.Vector3();
 const XR_OPTS = { optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'] };
 const APP_MODE = new URLSearchParams(location.search).has('app') || matchMedia('(display-mode: standalone)').matches;
+
+// the rep that scored lowest on the lesson's own metric, for the summary's diagnosis
+function worstRep(rs, key) {
+  const val = (r) => ({
+    rate: r.scanRate10 != null && r.par ? r.scanRate10 / r.par : null, timing: r.timing,
+    critical: r.critical == null ? null : { prime: 1, critical: 0.8, none: 0.2, late: 0 }[r.critical],
+    info: r.info, decision: r.decision, memory: r.memory, scenario: r.scenarioScore, score: r.total,
+    complete: ['completed', 'tight', 'goal'].includes(r.outcome) ? 1 : 0,
+  })[key];
+  let w = null;
+  rs.forEach((r, i) => { const v = val(r); if (v != null && (!w || v < w.v)) w = { i, v, r }; });
+  if (!w) return null;
+  const r = w.r;
+  const why = r.critical === 'late' ? 'EYES OFF THE BALL AS IT ARRIVED'
+    : r.sawPresser === false ? `PRESSER ${r.presserSide === 'BLIND' ? 'BEHIND YOU ' : ''}UNSEEN`
+    : r.sawBest === false ? `#${r.bestNumber} WAS FREE, NOT CHECKED`
+    : r.badScans ? `${r.badScans} SCAN${r.badScans > 1 ? 'S' : ''} DURING A TOUCH`
+    : r.fact || r.reason || '';
+  return { rep: w.i + 1, why };
+}
 
 class App {
   constructor() {
@@ -43,15 +63,19 @@ class App {
     this.panel = new Panel(this.scene, 1280, 800, 2.0);
     this.bar = new Panel(this.scene, 1280, 430, 1.5);
     this.hint = new Panel(this.scene, 1100, 170, 1.4);
+    this.pointer.panels.push(this.hint);
 
     // the locker room hub: live screens mounted on its boards, the room's objects are the buttons
     this.locker = new LockerRoom(this.scene);
     this.inLocker = false;
     const mount = (m, w, h, aspect) => {
       const mw = Math.min(m.userData.maxWidth || m.userData.width, (m.userData.maxHeight || m.userData.height) * aspect);
-      const p = new Panel(this.scene, w, h, mw * 0.96);
-      // on a wall: depth-tested and drawn under the floating panel
+      const p = new Panel(this.scene, w, h, mw * 0.86);
+      // on a wall: depth-tested, drawn under the floating panel, mipmapped (it redraws rarely)
       p.mesh.material.depthTest = true;
+      p.tex.generateMipmaps = true;
+      p.tex.minFilter = THREE.LinearMipmapLinearFilter;
+      p.boardAction = m.userData.action || null;
       p.mesh.renderOrder = 2;
       m.add(p.mesh);
       p.mesh.position.set(0, 0, 0.01);
@@ -91,6 +115,7 @@ class App {
     this.setupDesktopInput();
     this.setupXR();
     this.applySettings();
+    try { this.renderer.compile(this.scene, this.camera); } catch {}
     this.toMenuView();
     this.go('home');
 
@@ -209,8 +234,6 @@ class App {
       setTimeout(() => {
         this.applySettings();
         this.reanchor();
-        // first time in the headset: learn by playing
-        if (!store.data.tutorialDone && this.mode === 'menu') this.startTutorial();
       }, 400);
       this.renderer.xr.getReferenceSpace()?.addEventListener('reset', () => this.reanchor());
       this.redraw();
@@ -270,8 +293,12 @@ class App {
     this.audio.unlock();
     if (!ray) return;
     const hit = this.pointer.hitPanels(ray.origin, ray.dir);
-    if (hit && hit.b) { this.audio.ui(); hit.b.onClick(hit.x, hit.y); return; }
-    if (hit) return;
+    if (hit && hit.b) { this.audio.ui(); this.haptic(0.35, 25); hit.b.onClick(hit.x, hit.y); return; }
+    if (hit) {
+      const act = { [this.boards.career.mesh.uuid]: 'career', [this.boards.stats.mesh.uuid]: 'stats' }[hit.panel.mesh.uuid];
+      if (act && this.inLocker && ['menu', 'summary'].includes(this.mode)) this.lockerAction(act);
+      return;
+    }
     const obj = this.pickLocker(ray);
     if (obj && ['menu', 'summary'].includes(this.mode)) { this.lockerAction(obj.userData.action); return; }
     if (this.mode === 'play' && this.rep) {
@@ -330,8 +357,8 @@ class App {
     const g = c.getContext('2d');
     const grad = g.createRadialGradient(128, 128, 40, 128, 128, 128);
     grad.addColorStop(0, 'rgba(0,0,0,0)');
-    grad.addColorStop(0.55, 'rgba(0,0,0,0)');
-    grad.addColorStop(1, 'rgba(0,0,0,1)');
+    grad.addColorStop(0.3, 'rgba(0,0,0,0)');
+    grad.addColorStop(0.8, 'rgba(0,0,0,1)');
     g.fillStyle = grad;
     g.fillRect(0, 0, 256, 256);
     const tex = new THREE.CanvasTexture(c);
@@ -348,6 +375,7 @@ class App {
     const canRun = this.mode === 'play' && rep && (st === 'buildup' || st === 'incoming');
     // with the ball at your feet you can still walk it a few steps
     const canWalk = this.mode === 'play' && rep && st === 'decide';
+    const roomWalk = this.inLocker && ['menu', 'summary'].includes(this.mode);
     let ix = 0, iy = 0, sprint = false, turn = 0, handYaw = null;
     if (this.inXR) {
       const session = this.renderer.xr.getSession();
@@ -378,7 +406,7 @@ class App {
     if (Math.abs(turn) > 0.7 && !this.turnHeld && ['play', 'menu', 'card', 'summary', 'replay'].includes(this.mode)) {
       this.turnHeld = true;
       this.world.placeUser(this.world.userPos(), this.world.headYaw() + (Math.sign(turn) * -Math.PI) / 6);
-      this.fade.material.opacity = Math.max(this.fade.material.opacity, 0.85);
+      this.fade.material.opacity = Math.max(this.fade.material.opacity, 0.5);
       this.world.snapTurned = true; // the scan tracker must ignore this yaw jump
     } else if (Math.abs(turn) < 0.3) this.turnHeld = false;
 
@@ -386,15 +414,20 @@ class App {
     const headYaw = this.world.headYaw();
     if (this.bodyYaw == null) this.bodyYaw = headYaw;
     this.bodyYaw += Math.atan2(Math.sin(headYaw - this.bodyYaw), Math.cos(headYaw - this.bodyYaw)) * Math.min(1, dt / 0.6);
-    if (handYaw != null) this.lastHandYaw = handYaw;
+    if (handYaw != null) {
+      if (this.lastHandYaw == null) this.lastHandYaw = handYaw;
+      const d = Math.atan2(Math.sin(handYaw - this.lastHandYaw), Math.cos(handYaw - this.lastHandYaw));
+      // ignore wrist wobble under 8 degrees, then follow with a short lag
+      if (Math.abs(d) > 0.14) this.lastHandYaw += d * Math.min(1, dt / 0.15);
+    }
     const dirYaw = !this.inXR ? headYaw : store.settings.steer === 'head' ? this.bodyYaw : this.lastHandYaw ?? this.bodyYaw;
 
     let mag = Math.hypot(ix, iy);
     if (mag < 0.15) { mag = 0; this.sprintLatch = false; }
     const v = this.vel || (this.vel = { x: 0, z: 0 });
     let wantX = 0, wantZ = 0;
-    if (mag > 0 && (canRun || canWalk)) {
-      let top = canWalk ? 1.5 : sprint ? 6.2 : 3.8;
+    if (mag > 0 && (canRun || canWalk || roomWalk)) {
+      let top = roomWalk ? 1.6 : canWalk ? 1.5 : sprint ? 6.2 : 3.8;
       if (st === 'incoming') top = Math.min(top, 3);
       const sp = top * Math.min(1, mag);
       const fx = Math.sin(dirYaw), fz = Math.cos(dirYaw);
@@ -403,7 +436,7 @@ class App {
       const l = Math.hypot(mx, mz) || 1;
       wantX = (mx / l) * sp; wantZ = (mz / l) * sp;
     }
-    if (!['play', 'paused', 'quiz'].includes(this.mode)) { v.x = v.z = 0; }
+    if (!['play', 'paused', 'quiz'].includes(this.mode) && !roomWalk) { v.x = v.z = 0; }
     // linear ramps (6 m/s² up, 12 m/s² down) instead of exponential easing that spikes at the start
     const dvx = wantX - v.x, dvz = wantZ - v.z, dvl = Math.hypot(dvx, dvz);
     const speeding = Math.hypot(wantX, wantZ) > Math.hypot(v.x, v.z);
@@ -414,6 +447,13 @@ class App {
     this.moveSpeed = Math.hypot(v.x, v.z);
     const accel = Math.abs(this.moveSpeed - prevSpeed) / Math.max(dt, 1e-4);
 
+    if (this.moveSpeed > 0.02 && roomWalk) {
+      // inside the room's walls
+      const u = this.world.userPos(), o = this.locker.spawn.pos;
+      const nx = THREE.MathUtils.clamp(u.x + v.x * dt, o.x - 3.9, o.x + 3.9);
+      const nz = THREE.MathUtils.clamp(u.z + v.z * dt, o.z - 2.9, o.z + 2.9);
+      this.world.moveUser(nx - u.x, nz - u.z);
+    }
     if (this.moveSpeed > 0.02 && this.mode === 'play') {
       const u = this.world.userPos();
       const nx = THREE.MathUtils.clamp(u.x + v.x * dt, -52, 52);
@@ -439,7 +479,7 @@ class App {
     // vignette follows artificial motion only (speed and acceleration), never your own head turns
     const vm = this.vignette.material;
     const want = store.settings.vignette !== false && this.inXR
-      ? Math.min(0.75, (this.moveSpeed / 6.2) * 0.45 + Math.min(1, accel / 6) * 0.3) : 0;
+      ? Math.min(0.85, (this.moveSpeed / 6.2) * 0.6 + Math.min(1, accel / 6) * 0.3) : 0;
     vm.opacity += (want - vm.opacity) * Math.min(1, dt * 8);
     this.vignette.visible = vm.opacity > 0.02;
   }
@@ -497,7 +537,9 @@ class App {
 
   toMenuView() {
     this.enterLocker();
-    this.world.placeUser(this.locker.spawn.pos, this.locker.spawn.yaw);
+    // a step toward the front wall so the boards are close enough to read
+    const sp = this.locker.spawn;
+    this.world.placeUser(sp.pos.clone().add(new THREE.Vector3(Math.sin(sp.yaw), 0, Math.cos(sp.yaw)).multiplyScalar(1.1)), sp.yaw);
   }
 
   enterLocker() {
@@ -535,7 +577,7 @@ class App {
     this.locker.setTrophies(Math.min(8, Math.floor(passed / 3)));
     const n = nextLesson(p);
     this.locker.setNextLabel(p.passed.every(Boolean) ? 'CAREER COMPLETE' : `LESSON ${n + 1} · ${CAREER[n].name}`);
-    if (!this.careerStageSet) { this.careerStage = CAREER[n].stage; this.careerStageSet = true; }
+    if (this.mode !== 'menu' || this.screen !== 'career') this.careerStage = CAREER[n].stage;
     this.boards.career.show(S.career(this, true));
     this.boards.notice.show(S.today(this));
     this.boards.stats.show(S.stats(this, true));
@@ -546,7 +588,7 @@ class App {
         k.text(label, k.w - 44, k.h / 2 + 2, 40, { align: 'right', base: 'middle', color: '#111' });
       });
       const sp = this.locker.spawn;
-      this.hub.mesh.position.set(sp.pos.x + Math.sin(sp.yaw) * 1.5, (this.inXR ? this.headPos().y : 1.7) - 0.6, sp.pos.z + Math.cos(sp.yaw) * 1.5);
+      this.hub.mesh.position.set(sp.pos.x + Math.sin(sp.yaw) * 2.5, (this.inXR ? this.headPos().y : 1.7) - 0.6, sp.pos.z + Math.cos(sp.yaw) * 2.5);
       this.hub.mesh.rotation.set(-0.35, sp.yaw + Math.PI, 0, 'YXZ');
     } else this.hub.hide();
   }
@@ -617,17 +659,38 @@ class App {
 
   startCareer(level) {
     const l = CAREER[level];
-    this.beginSession({ level, role: l.role, difficulty: l.difficulty, reps: l.reps, quizChance: l.quizChance, drill: l.drill, drills: l.drills, roles: l.roles, speed: l.speed, minFlight: l.minFlight });
+    this.beginSession({ level, role: l.role, difficulty: l.difficulty, reps: l.reps, quizChance: l.quizChance, drill: l.drill, pairs: l.pairs, speed: l.speed, minFlight: l.minFlight });
   }
 
-  continueCareer() { this.startCareer(nextLesson(store.profile)); }
+  continueCareer() {
+    // first press of CONTINUE plays the three-rep tutorial, which ends on a button into lesson 1
+    if (!store.data.tutorialDone && !store.profile.passed[0]) return this.startTutorial();
+    this.startCareer(nextLesson(store.profile));
+  }
+
+  // which metrics the player has been taught so far (the card only shows those)
+  taught() {
+    const out = new Set(['scan', 'decision']);
+    CAREER.forEach((l, i) => { if (store.profile.passed[i] && l.teaches) out.add(l.teaches); });
+    const cur = this.session?.level != null ? CAREER[this.session.level] : null;
+    if (cur?.teaches) out.add(cur.teaches);
+    if (this.session?.level == null && !this.session?.tutorial) ['timing', 'critical', 'info'].forEach((k) => store.profile.passed.some(Boolean) && out.add(k));
+    return out;
+  }
+
+  switchProfile(i) {
+    store.setActive(i);
+    this.careerStage = CAREER[nextLesson(store.profile)].stage;
+    this.refreshBoards();
+    this.redraw();
+  }
 
   startDaily() { this.beginSession({ level: null, ...dailyDrill(store.profile) }); }
 
   startWeakSpot() {
-    const w = weakSpot(store.profile);
-    if (!w) return this.continueCareer();
-    this.beginSession({ level: null, drill: w.drill, role: w.role, difficulty: 'MEDIUM', reps: 5, quizChance: 0, weak: w.key });
+    const w = weakSpot(store.profile) || { key: 'rate', drill: 'match', role: 'CM' };
+    const lv = currentLevel(store.profile);
+    this.beginSession({ level: null, drill: w.drill, role: w.role, difficulty: lv.difficulty, speed: lv.speed, reps: 5, quizChance: 0, weak: w.key });
   }
 
   // a short controller buzz; Quest controllers expose hapticActuators on the gamepad
@@ -660,7 +723,9 @@ class App {
     const pass = this.inXR ? 'POINT AT A TEAMMATE · PULL THE TRIGGER' : 'CLICK A TEAMMATE TO PASS';
     let text = null;
     const move = this.inXR ? 'LEFT STICK RUNS · CLICK IT TO SPRINT' : 'WASD RUNS · SHIFT SPRINTS';
-    if (rep.state === 'buildup') text = scans === 0 ? (s.index === 0 ? 'LOOK OVER YOUR SHOULDER' : move) : `SCANS ${scans}`;
+    const pr = rep.pressers?.[0];
+    const prText = pr ? `PRESSER ${Math.round(pr.pos.distanceTo(this.world.userPos()))} M ${rep.sawPresser?.[0] > -1 ? '' : 'BEHIND '}· SCANS ${scans}` : `SCANS ${scans}`;
+    if (rep.state === 'buildup') text = scans === 0 ? (s.index === 0 ? 'LOOK OVER YOUR SHOULDER' : move) : s.index === 0 ? prText : `SCANS ${scans}`;
     else if (rep.state === 'incoming' || rep.state === 'decide') text = s.index < 2 ? pass : null;
     if (s.index === 2) text = rep.state === 'buildup' && scans ? `SCANS ${scans}` : null;
     if (text === this.hintText) return;
@@ -668,7 +733,8 @@ class App {
     if (!text) { this.hint.hide(); return; }
     this.hint.show((k) => {
       k.bg(60);
-      k.text(text, k.w / 2, k.h / 2 + 4, 76, { align: 'center', base: 'middle', weight: 800 });
+      k.text(text, (k.w - 200) / 2, k.h / 2 + 4, 62, { align: 'center', base: 'middle', weight: 800 });
+      k.button('skip', k.w - 190, 30, 160, k.h - 60, 'SKIP', { size: 40, onClick: () => this.skipTutorial() });
     });
     if (!this.hintPlaced) {
       this.hintPlaced = true;
@@ -684,14 +750,27 @@ class App {
     return [-Math.sin(ang), Math.hypot(b.x - h.x, b.z - h.z)];
   }
 
+  skipTutorial() {
+    store.data.tutorialDone = true;
+    store.save();
+    this.hideHint();
+    this.startCareer(0);
+  }
+
   hideHint() { this.hint.hide(); this.hintText = null; this.hintPlaced = false; }
 
   beginSession(opts) {
-    this.leaveLocker();
+    if (this.pendingAfter) return;
     this.lastSessionOpts = opts;
-    this.session = { ...opts, index: 0, results: [] };
     this.panel.hide();
-    this.startRep();
+    this.hub.hide();
+    this.setFade(1);
+    this.mode = 'between';
+    this.after(0.25, () => {
+      this.leaveLocker();
+      this.session = { ...opts, index: 0, results: [] };
+      this.startRep();
+    });
   }
 
   startRep() {
@@ -699,8 +778,9 @@ class App {
     // guarantee at least one quiz in a memory-heavy session
     const quiz = s.quizChance >= 1 || Math.random() < s.quizChance || (s.quizChance > 0.5 && s.index === s.reps - 1 && !s.results.some((r) => r.memory != null));
     // mixed sessions cycle through their drills and positions rep by rep
-    const drill = s.drills ? s.drills[s.index % s.drills.length] : s.drill || 'match';
-    const role = s.roles ? s.roles[s.index % s.roles.length] : s.role;
+    const pair = s.pairs ? s.pairs[s.index % s.pairs.length] : null;
+    const drill = pair ? pair[0] : s.drill || 'match';
+    const role = pair ? pair[1] : s.role;
     const Drill = DRILLS[drill] || DRILLS.match;
     this.rep = new Drill(this.world, {
       role, difficulty: s.difficulty, quiz, motion: store.settings.motion, speed: s.speed || 1,
@@ -787,7 +867,13 @@ class App {
     if (this.pendingAfter) return;
     this.endReplay();
     s.index++;
-    if (s.index >= s.reps) return this.finishSession();
+    if (s.index >= s.reps) {
+      this.panel.hide();
+      this.setFade(1);
+      this.mode = 'between';
+      this.after(0.25, () => { this.finishSession(); this.setFade(0); });
+      return;
+    }
     // fade out before teleporting to the next spot, never cut
     this.panel.hide();
     this.setFade(1);
@@ -802,7 +888,10 @@ class App {
     const avg = (f) => { const v = rs.map(f).filter((x) => x != null); return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : null; };
     const metrics = sessionMetrics(rs);
     const lesson = s.level != null ? CAREER[s.level] : null;
-    const objective = checkObjective(lesson, metrics);
+    const fails = s.level != null ? store.profile.fails[s.level] || 0 : 0;
+    const objective = checkObjective(lesson, metrics, fails);
+    const ratingBefore = rating(store.profile);
+    const drillsBefore = unlockedDrills(store.profile);
     const prevBest = s.level != null ? store.profile.best[s.level] : null;
     const rec = {
       date: Date.now(), level: s.level, role: s.role, difficulty: s.difficulty, speed: s.speed || 1, reps: rs.length,
@@ -815,7 +904,16 @@ class App {
     const wasPassed = s.level != null && store.profile.passed[s.level];
     store.recordSession(rec);
     rec.firstPass = !!objective?.passed && !wasPassed;
-    if (rec.firstPass || rec.newBest) this.audio.cheer(rec.firstPass ? 0.9 : 0.6);
+    if (rec.firstPass || rec.newBest) { this.audio.cheer(rec.firstPass ? 0.9 : 0.6); this.haptic(0.8, 120); }
+    else if (objective && !objective.passed) { this.audio.groan(); this.haptic(0.3, 200); }
+    rec.ratingBefore = ratingBefore;
+    rec.ratingAfter = rating(store.profile);
+    rec.streak = streak(store.profile);
+    rec.unlocked = [...unlockedDrills(store.profile)].filter((d) => !drillsBefore.has(d));
+    rec.trophy = rec.firstPass && (store.profile.passed.filter(Boolean).length % 3 === 0);
+    rec.fails = s.level != null ? store.profile.fails[s.level] || 0 : 0;
+    // the rep that hurt the objective most, and what happened in it
+    if (objective && !objective.passed) rec.worst = worstRep(rs, objective.key);
     if (s.tutorial) { store.data.tutorialDone = true; store.save(); }
     const starsEarned = store.starsFor(rec.score);
     const next = s.tutorial ? 0 : s.level != null && objective?.passed && s.level < CAREER.length - 1 ? s.level + 1 : null;
@@ -1085,6 +1183,7 @@ class App {
       for (const r of rays) { if (this.pointer.hitPanels(r.origin, r.dir)) continue; lockerHover = this.pickLocker(r); if (lockerHover) break; }
     }
     if (this.inLocker) this.locker.setHover(lockerHover);
+    if (lockerHover !== this._lastLockerHover) { if (lockerHover) this.haptic(0.2, 15); this._lastLockerHover = lockerHover; }
     if (lockerHover && !this.inXR) this.renderer.domElement.style.cursor = 'pointer';
   }
 }
