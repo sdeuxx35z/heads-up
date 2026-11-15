@@ -16,9 +16,12 @@
     font: 600 18px "Barlow Condensed", sans-serif; letter-spacing: 0.04em; display: none; pointer-events: none; }
   body.desk #hint { display: block; }
 </style>
-<script type="module" crossorigin src="./chunk-4ekjm6nd.js"></script></head>
+<script type="module" crossorigin src="./chunk-jhbrvk79.js"></script><link rel="manifest" href="./manifest.webmanifest"><link rel="icon" href="./icon-192.png"><meta name="theme-color" content="#07090b"><script>if('serviceWorker' in navigator)addEventListener('load',()=>navigator.serviceWorker.register('./sw.js'))</script></head>
 <body>
 <div id="boot">HEADS UP</div>
+<button id="enter" type="button" style="position:fixed;left:50%;bottom:48px;transform:translateX(-50%);display:none;padding:22px 64px;border-radius:40px;border:1.5px solid rgba(255,255,255,0.35);background:rgba(255,122,26,0.92);color:#111;font:800 34px 'Barlow Condensed',sans-serif;letter-spacing:0.02em;cursor:pointer;box-shadow:0 12px 40px rgba(0,0,0,0.45)">ENTER VR</button>
+<div id="vrerr" hidden style="position:fixed;left:50%;bottom:140px;transform:translateX(-50%);color:#ff5a4f;font:700 20px 'Barlow Condensed',sans-serif"></div>
+<style>body.vr-ready:not(.xr) #enter{display:block!important}</style>
 <div id="hint">DRAG TO LOOK · CLICK A TEAMMATE TO PASS · ESC PAUSES</div>
 
 </body>
