@@ -1,0 +1,12 @@
+{
+  "name": "lookup",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot server.ts",
+    "build": "bun build.ts"
+  },
+  "dependencies": {
+    "three": "0.170.0"
+  }
+}

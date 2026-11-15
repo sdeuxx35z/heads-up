@@ -1,0 +1,6 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "headsup", "runtimeExecutable": "bun", "runtimeArgs": ["server.ts"], "port": 7820 }
+  ]
+}
