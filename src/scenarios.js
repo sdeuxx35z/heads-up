@@ -1130,6 +1130,155 @@ export class ColourScenario extends Scenario {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Colour memory. The same three teammates as the colour call, but their colours only flash one at
+// a time during the build-up (an opponent flashes one too), then go dark. While the ball is in
+// flight a colour is called: pass first time to whoever wore it. The fakes: a colour nobody wore,
+// the opponent's colour, or a grey call (no colour). Then nobody is on: play it back to the passer.
+// ---------------------------------------------------------------------------------------------
+export const NO_COLOUR = { name: 'NO COLOUR', hex: 0x8f9592, css: '#8f9592' };
+
+export class MemoryScenario extends ColourScenario {
+  static key = 'memory';
+  static roles = ['CM', 'CDM', 'CAM', 'W', 'ST'];
+  static flight = 1.5;
+  static window = 0.9;
+  static minWindow = 1.6;
+
+  build() {
+    super.build();
+    const U = this.U, cols = new Set([...this.cmap.values()]);
+    const spare = PALETTE.filter((c) => !cols.has(c)).sort(() => Math.random() - 0.5);
+    // the decoy: the nearest free opponent off to the side or behind, never the presser
+    const toPasser = heading(U, this.passer.pos);
+    const decoy = this.away.filter((o) => o.slot !== 'GK' && o !== this.presser)
+      .map((o) => ({ o, d: dist2(o.pos, U), a: angDiff(heading(U, o.pos), toPasser) }))
+      .filter((x) => x.a > 60 * DEG && x.d < 26)
+      .sort((x, y) => x.d - y.d)[0]?.o
+      || this.away.find((o) => o.slot !== 'GK' && o !== this.presser);
+    this.decoy = decoy;
+    this.decoyColour = spare[0];
+    this.unusedColour = spare[1];
+    // what gets called: two reps in three a teammate's colour, the rest a fake
+    const r = Math.random();
+    this.callKind = r < 0.62 ? 'mate' : r < 0.8 ? 'decoy' : 'none';
+    this.callColour = this.callKind === 'mate' ? this.cmap.get(this.calledPlayer)
+      : this.callKind === 'decoy' ? this.decoyColour
+      : Math.random() < 0.5 ? NO_COLOUR : this.unusedColour;
+    if (this.callKind !== 'mate') this.calledPlayer = null;
+    // one flash each, in a random order, spaced through the build-up
+    const len = (0.25 + 0.3 * this.diff.window) / this.gameSpeed; // about 1 s easy, 0.6 s elite
+    const order = [...this.coloured, decoy].sort(() => Math.random() - 0.5);
+    let at = rand(0.45, 0.7) / this.gameSpeed;
+    this.flashes = order.map((p) => {
+      const f = { p, colour: p === decoy ? this.decoyColour : this.cmap.get(p), at, len, seen: false, acc: 0, gap: 0 };
+      at += len + rand(0.35, 0.6) / this.gameSpeed;
+      return f;
+    });
+    this.flashesDone = false;
+    this.chainTo(this.passer, 3);
+  }
+
+  afterSeal() { this.paintRings(); }
+
+  // rings only show while flashing
+  paintRings() {
+    const live = new Set();
+    if (this.state === 'buildup' || this.state === 'incoming' || this.state === 'setup') {
+      for (const f of this.flashes || []) {
+        if (this.t >= f.at && this.t < f.at + f.len) { f.p.highlight(f.colour.hex, 0.95); live.add(f.p); }
+      }
+    }
+    for (const p of [...this.coloured, this.decoy]) if (p && !live.has(p)) p.highlight(0xffffff, 0);
+  }
+
+  pre(s) {
+    super.pre(s);
+    if (this.state !== 'buildup' && this.state !== 'incoming') return;
+    // "saw the flash": the gaze cone on him for 0.12 s while it was lit (a snap turn is no look)
+    const w = this.world;
+    if (w.snapTurned) return;
+    const user = w.userPos(this._u), yaw = w.headYaw();
+    for (const f of this.flashes) {
+      if (f.seen || this.t < f.at || this.t >= f.at + f.len) continue;
+      if (angDiff(yaw, heading(user, f.p.pos)) < 10 * DEG) {
+        f.acc += s; f.gap = 0;
+        if (f.acc >= 0.12) f.seen = true;
+      } else if ((f.gap += s) > 0.35) f.acc = 0;
+    }
+    const last = this.flashes[this.flashes.length - 1];
+    this.flashesDone = this.t >= last.at + last.len;
+  }
+
+  // the last pass waits until every flash has been shown
+  nextPass(user) {
+    const next = this.chain[this.chain.indexOf(this.carrier) + 1];
+    if (!next && !this.flashesDone) { this.hold = 0.15; return; }
+    super.nextPass(user);
+  }
+
+  fireCall() {
+    this.called = true;
+    this.callT = this.t;
+    this.callLeft = 0.45;
+    this.events.push({ t: this.t, type: 'call' });
+    const c = this.callColour, sc = this.world.scene;
+    if (sc) {
+      let h = this.world.callHalo;
+      if (!h) {
+        h = new THREE.Mesh(new THREE.SphereGeometry(0.5, 20, 14), new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.6, depthWrite: false }));
+        h.renderOrder = 8;
+        sc.add(h);
+        this.world.callHalo = h;
+      }
+      h.material.color.setHex(c.hex);
+      h.position.set(this.world.ball.pos.x, this.world.ball.pos.y + 0.3, this.world.ball.pos.z);
+      h.visible = true;
+    }
+    if (this.fx.alert) this.fx.alert(); else this.fx.ui?.();
+  }
+
+  updateAimGlow() {
+    Scenario.prototype.updateAimGlow.call(this);
+    if (this.state === 'buildup') this.paintRings();
+  }
+
+  answer() {
+    if (this.callKind === 'mate') return { target: this.calledPlayer, one: true };
+    return { target: this.passer, one: true };
+  }
+  wrongs() { return this.callKind === 'mate' ? this.coloured.filter((p) => p !== this.calledPlayer) : this.coloured; }
+
+  valueOf(o) {
+    if (o.kind !== 'pass') return -0.3;
+    const late = !this._ot && (this.decideT || 0) > 1.1;
+    const a = this.answer().target;
+    if (o.target === a) return late ? 0.25 : BONUS;
+    return this.coloured.includes(o.target) ? -0.35 : -0.2;
+  }
+
+  describe(r) {
+    const ch = this.chosen?.target, c = this.callColour, rt = this.touchDelay ?? null;
+    const fake = this.callKind !== 'mate';
+    const missed = this.flashes.filter((f) => !f.seen && f.p !== this.decoy).length;
+    r.calledColour = c.name;
+    r.callKind = this.callKind;
+    r.flashesSeen = this.flashes.filter((f) => f.seen).length;
+    r.flashesMissed = missed;
+    r.onTime = rt != null && rt <= 1.1;
+    r.reaction = rt;
+    r.correct = ch === this.answer().target;
+    r.fakedOut = fake && ch != null && ch !== this.passer;
+    const wore = (p) => (p === this.decoy ? this.decoyColour : this.cmap.get(p))?.name;
+    r.fact = r.correct
+      ? (fake ? `NOBODY WORE ${c.name} · BACK` : `${c.name} = #${this.calledPlayer.number}`)
+      : r.fakedOut ? `FAKED: NOBODY WORE ${c.name}` : `${c.name} WAS #${this.calledPlayer?.number ?? '?'}`;
+    r.expected = fake ? (this.callKind === 'decoy' ? `${c.name} WAS AN OPPONENT · PLAY IT BACK` : `NOBODY WORE ${c.name} · PLAY IT BACK`) : `FIRST TIME TO ${c.name}`;
+    r.reason = missed ? `MISSED ${missed} OF 3 FLASHES` : `SAW ALL 3 FLASHES${wore(ch) ? ` · #${ch.number} WORE ${wore(ch)}` : ''}`;
+    r.scenarioScore = r.correct ? (r.onTime ? 100 : 65) - missed * 10 : 0;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // D6 Receive and turn. Your back to the goal, a presser behind you, a free midfielder ahead of the
 // presser. A shoulder scan earns the turn and the forward pass; without it, one touch back.
 // ---------------------------------------------------------------------------------------------
@@ -1748,6 +1897,7 @@ export const SCENARIOS = {
   thirdman: ThirdManScenario,
   signal: SignalScenario,
   colour: ColourScenario,
+  memory: MemoryScenario,
   turn: TurnScenario,
   inhibit: InhibitScenario,
   sandwich: SandwichScenario,
@@ -1760,6 +1910,7 @@ export const SCENARIO_NAMES = {
   thirdman: 'THIRD-MAN WALL',
   signal: 'HAND-SIGNAL TRAP',
   colour: 'COLOUR CALL',
+  memory: 'COLOUR MEMORY',
   turn: 'RECEIVE AND TURN',
   inhibit: 'INHIBITION',
   sandwich: 'SANDWICH',

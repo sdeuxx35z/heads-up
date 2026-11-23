@@ -9,6 +9,8 @@ import { Audio } from './audio.js';
 import { store } from './store.js';
 import { CAREER, DRILL_GOALS, LESSON_GOALS } from './config.js';
 import * as S from './screens.js';
+import * as PS from './proScreens.js';
+import { newPro, matchdaySession, playMatch, trainingSession, applyTraining, acceptOffer, nextFixture, clubOf } from './pro.js';
 import { makeQuiz, quizScreen } from './quiz.js';
 import { sessionMetrics, checkObjective, nextLesson, dailyDrill, weakSpot, currentLevel, rating, streak, unlockedDrills } from './career.js';
 
@@ -83,7 +85,7 @@ class App {
       return p;
     };
     // a waist-high CONTINUE in front of your locker, so the first thing you can do is play
-    this.hub = new Panel(this.scene, 1100, 190, 1.15);
+    this.hub = new Panel(this.scene, 1100, 320, 1.15);
     this.pointer.panels.push(this.hub);
     this.boards = {
       career: mount(this.locker.mounts.career, 1280, 800, 1.6),
@@ -592,12 +594,17 @@ class App {
     this.boards.stats.show(S.stats(this, true));
     if (this.mode === 'menu' && this.screen === 'home') {
       const label = p.passed.every(Boolean) ? 'CAREER COMPLETE' : `${String(n + 1).padStart(2, '0')} · ${CAREER[n].name}`;
+      const pro = p.pro;
+      const proLabel = pro ? proHubLine(pro) : 'START AS A 17-YEAR-OLD';
       this.hub.show((k) => {
-        k.button('go', 0, 0, k.w, k.h, 'CONTINUE', { primary: true, size: 70, r: 40, onClick: () => this.continueCareer() });
-        k.text(label, k.w - 44, k.h / 2 + 2, 40, { align: 'right', base: 'middle', color: '#111' });
+        k.button('go', 0, 0, k.w, 190, 'CONTINUE', { primary: true, size: 70, r: 40, onClick: () => this.continueCareer() });
+        k.text(label, k.w - 44, 97, 40, { align: 'right', base: 'middle', color: '#111' });
+        k.button('pro', 0, 210, k.w, 110, '', { r: 34, onClick: () => this.openPro() });
+        k.text('PLAYER CAREER', 44, 266, 46, { base: 'middle', weight: 800 });
+        k.text(proLabel, k.w - 40, 266, 30, { align: 'right', base: 'middle', color: 'rgba(242,240,232,0.6)' });
       });
       const sp = this.locker.spawn;
-      this.hub.mesh.position.set(sp.pos.x + Math.sin(sp.yaw) * 2.5, (this.inXR ? this.headPos().y : 1.7) - 0.6, sp.pos.z + Math.cos(sp.yaw) * 2.5);
+      this.hub.mesh.position.set(sp.pos.x + Math.sin(sp.yaw) * 2.5, (this.inXR ? this.headPos().y : 1.7) - 0.5, sp.pos.z + Math.cos(sp.yaw) * 2.5);
       this.hub.mesh.rotation.set(-0.35, sp.yaw + Math.PI, 0, 'YXZ');
     } else this.hub.hide();
   }
@@ -656,7 +663,12 @@ class App {
     this.refreshBoards();
     // home is the room itself; everything else opens as a panel in front of you
     if (name === 'home') this.panel.hide();
-    else { this.panel.show(S[name](this)); this.placePanel(); }
+    else {
+      const screen = S[name] || PS[name];
+      this.panel.show(name === 'proReport' ? screen(this, this.proReportData) : screen(this));
+      if (name === 'proSeasonEnd' || name === 'proInbox') store.save();
+      this.placePanel();
+    }
   }
 
   redraw() {
@@ -700,6 +712,37 @@ class App {
     const w = weakSpot(store.profile) || { key: 'rate', drill: 'match', role: 'CM' };
     const lv = currentLevel(store.profile);
     this.beginSession({ level: null, drill: w.drill, role: w.role, difficulty: lv.difficulty, speed: lv.speed, reps: 5, quizChance: 0, weak: w.key });
+  }
+
+  // ---------- player career
+
+  openPro() { this.audio.ui(); this.go(store.profile.pro ? 'proHub' : 'proCreate'); }
+
+  proCreate(opts) {
+    store.profile.pro = newPro(opts);
+    store.save();
+    this.go('proHub');
+  }
+
+  proPlay() {
+    const pro = store.profile.pro;
+    if (!pro) return;
+    const o = matchdaySession(pro);
+    if (!o) return this.go('proSeasonEnd');
+    store.save(); // the lineup is fixed for this matchday
+    this.beginSession(o);
+  }
+
+  proTrain(focus) {
+    const pro = store.profile.pro;
+    if (pro) this.beginSession(trainingSession(pro, focus));
+  }
+
+  proSign(i) {
+    const pro = store.profile.pro;
+    if (!pro || !acceptOffer(pro, i)) return;
+    store.save();
+    this.go('proHub');
   }
 
   // a short controller buzz; Quest controllers expose hapticActuators on the gamepad
@@ -861,7 +904,9 @@ class App {
     if (!s.tutorial && firstOfDrill && (s.index === 0 || !briefed.includes(drill))) {
       if (!briefed.includes(drill)) { briefed.push(drill); store.save(); }
       const lesson = s.level != null ? CAREER[s.level] : null;
-      const title = lesson ? `${String(s.level + 1).padStart(2, '0')} · ${lesson.name}` : s.daily ? 'DAILY DRILL' : s.weak ? 'WEAK SPOT' : 'PRACTICE';
+      const title = lesson ? `${String(s.level + 1).padStart(2, '0')} · ${lesson.name}` : s.training ? `TRAINING · ${s.focus}`
+        : s.pro ? `MATCHDAY ${s.fixture.matchday} · ${s.fixture.home ? 'V' : 'AT'} ${s.fixture.oppName.toUpperCase()}${s.lineup === 'SUB' ? ' · OFF THE BENCH' : s.lineup === 'BENCH' ? ' · BENCH: WARM-UP' : ''}`
+        : s.daily ? 'DAILY DRILL' : s.weak ? 'WEAK SPOT' : 'PRACTICE';
       this.mode = 'brief';
       this.panel.show(S.brief(this, { title, drill, role: this.rep.roleKey || role, lesson, firstOfLesson: s.index === 0 }));
       this.placePanel(-0.05, 2.2);
@@ -897,7 +942,7 @@ class App {
     } else this.panel.hide();
   }
 
-  quitSession() { this.go('home'); }
+  quitSession() { this.go(this.session?.pro ? 'proHub' : 'home'); }
 
   answerQuiz(score) {
     const q = this.quiz;
@@ -985,6 +1030,7 @@ class App {
     rec.fails = s.level != null ? store.profile.fails[s.level] || 0 : 0;
     // the rep that hurt the objective most, and what happened in it
     if (objective && !objective.passed) rec.worst = worstRep(rs, objective.key);
+    if (s.pro && store.profile.pro) return this.finishPro(s, rs, metrics);
     if (s.tutorial) { store.data.tutorialDone = true; store.save(); }
     const starsEarned = store.starsFor(rec.score);
     const next = s.tutorial ? 0 : s.level != null && objective?.passed && s.level < CAREER.length - 1 ? s.level + 1 : null;
@@ -996,6 +1042,28 @@ class App {
     this.refreshBoards();
     this.panel.show(S.summary(this, rec, starsEarned, next));
     this.placePanel();
+  }
+
+  // a matchday or a training session of the player career: the club's screens, not the lesson summary
+  finishPro(s, rs, metrics) {
+    const pro = store.profile.pro;
+    this.audio.whistle(true);
+    this.mode = 'summary';
+    this.rep = null;
+    this.world.clearOverlays();
+    this.toMenuView();
+    if (s.training) {
+      this.proTrained = applyTraining(pro, s.focus, metrics, rs);
+      store.save();
+      this.go('proTraining');
+      return;
+    }
+    const report = playMatch(pro, rs);
+    store.save();
+    if (report?.motm || report?.result === 'W') { this.audio.cheer(report.motm ? 0.9 : 0.6); this.haptic(0.8, 120); }
+    else if (report?.result === 'L') this.audio.groan();
+    this.proReportData = report;
+    this.go('proReport');
   }
 
   // ---------- replay
@@ -1268,3 +1336,8 @@ const fontsReady = Promise.race([
 ]);
 fontsReady.then(() => { window.app = new App(); document.getElementById('boot')?.remove(); });
 
+// one line under PLAYER CAREER on the locker hub: club, rating, next match
+function proHubLine(pro) {
+  const c = clubOf(pro.clubId, pro), fx = nextFixture(pro);
+  return `${(c.short || c.name).toUpperCase()} · OVR ${pro.ovr}${fx ? ` · NEXT ${fx.home ? 'V' : 'AT'} ${(fx.oppShort || fx.oppName).toUpperCase()}` : ' · SEASON OVER'}`;
+}

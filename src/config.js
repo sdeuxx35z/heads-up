@@ -71,29 +71,38 @@ const LESSONS = [
 
   L('WHERE WAS HE', { quizChance: 1, objective: ['memory', 60], teaches: 'memory' }),
   L('COLOUR CALL', { drill: 'colour', objective: ['correct', 0.7] }),
+  L('COLOUR MEMORY', { drill: 'memory', objective: ['correct', 0.6] }),
   L('BEHIND YOU', { drill: 'awareness', objective: ['memory', 70] }),
+  L('LAST COLOUR', { drill: 'latest', objective: ['memory', 60] }),
   L('IGNORE THE WAVE', { drill: 'signal', objective: ['correct', 0.7] }),
   L('CHANGE YOUR MIND', { drill: 'inhibit', objective: ['correct', 0.6] }),
-  L('EXAM: REMEMBER', { reps: 8, difficulty: 'HARD', quizChance: 0.5, pairs: [['match', 'CB'], ['colour', 'CM'], ['awareness', 'CM'], ['signal', 'W'], ['inhibit', 'CDM']], objective: ['score', 62] }),
+  L('EXAM: REMEMBER', { reps: 8, difficulty: 'HARD', quizChance: 0.5, pairs: [['match', 'CB'], ['memory', 'CM'], ['awareness', 'CM'], ['signal', 'W'], ['latest', 'CDM'], ['inhibit', 'CDM'], ['colour', 'CAM']], objective: ['score', 62] }),
 
   L('WINGER', { role: 'W', difficulty: 'HARD', pairs: [['match', 'W'], ['through', 'W'], ['switch', 'W']], objective: ['score', 62] }),
   L('STRIKER', { role: 'ST', difficulty: 'HARD', pairs: [['match', 'ST'], ['through', 'ST'], ['thirdman', 'ST']], objective: ['score', 60] }),
   L('GOALKEEPER', { role: 'GK', difficulty: 'HARD', pairs: [['gkbuild', 'GK'], ['match', 'GK']], objective: ['score', 55] }),
   L('TWO PRESSERS', { difficulty: 'ELITE', objective: ['score', 58] }),
   L('FULL SPEED', { difficulty: 'ELITE', speed: 1.1, pairs: [['match', 'CM'], ['press', 'CDM'], ['switch', 'W'], ['thirdman', 'ST'], ['match', 'CB']], objective: ['score', 62] }),
-  L('FINAL', { reps: 12, difficulty: 'ELITE', speed: 1.15, quizChance: 0.3, pairs: [['match', 'CB'], ['press', 'CM'], ['turn', 'CDM'], ['switch', 'FB'], ['thirdman', 'CAM'], ['through', 'W'], ['match', 'ST'], ['gkbuild', 'GK'], ['sandwich', 'CM'], ['colour', 'CAM'], ['inhibit', 'CDM'], ['signal', 'ST']], objective: ['score', 68] }),
+  L('FINAL', { reps: 12, difficulty: 'ELITE', speed: 1.15, quizChance: 0.3, pairs: [['match', 'CB'], ['press', 'CM'], ['turn', 'CDM'], ['switch', 'FB'], ['thirdman', 'CAM'], ['through', 'W'], ['match', 'ST'], ['gkbuild', 'GK'], ['sandwich', 'CM'], ['memory', 'CAM'], ['inhibit', 'CDM'], ['signal', 'ST']], objective: ['score', 68] }),
 ];
-export const CAREER = LESSONS.map((l, i) => ({ ...l, index: i, stage: Math.floor(i / 6) }));
+// lessons per stage, in order (REMEMBER has two more: the colour-memory pair)
+export const STAGE_SIZES = [6, 6, 8, 6];
+const stageOf = (i) => { let n = 0; for (let k = 0; k < STAGE_SIZES.length; k++) { n += STAGE_SIZES[k]; if (i < n) return k; } return STAGE_SIZES.length - 1; };
+export const CAREER = LESSONS.map((l, i) => ({ ...l, index: i, stage: stageOf(i) }));
+// where lessons were added since the first release, so saved progress can be shifted to match (store.js)
+export const CAREER_INSERTS = [[2, [14, 16]]];
 // What each drill asks of you, in two short lines, shown on the briefing card before you play it.
 export const DRILL_GOALS = {
   match: ['LOOK AROUND BEFORE THE BALL COMES', 'THEN PASS TO THE BEST TEAMMATE'],
   rondo: ['5 V 2: KEEP THE BALL', 'PASS PAST THE TWO IN THE MIDDLE'],
-  awareness: ['A PLAYER BEHIND YOU LIGHTS UP', 'REMEMBER THE COLOUR, THEN PASS'],
+  awareness: ['A PLAYER BEHIND YOU MAY LIGHT UP', 'REMEMBER THE COLOUR · NOTHING LIT? ANSWER NONE'],
+  latest: ['A TEAMMATE BEHIND YOU KEEPS CHANGING COLOUR', 'KNOW HIS COLOUR AS THE BALL REACHES YOU'],
   press: ['A PRESSER IS COMING FROM BEHIND', 'SPOT HIM, THEN PASS AWAY FROM HIM'],
   switch: ['THE NEAR SIDE IS CROWDED', 'FIND THE FREE MAN ON THE FAR SIDE'],
   thirdman: ['A TEAMMATE RUNS PAST YOUR MARKER', 'AIM AT THE GRASS AHEAD OF HIM'],
   signal: ['ONE TEAMMATE WAVES, ONE IS FREE', 'PASS TO THE FREE ONE, NOT THE WAVE'],
   colour: ['A COLOUR FLASHES AS THE BALL COMES', 'PASS TO THAT COLOUR, FIRST TIME'],
+  memory: ['COLOURS FLASH ONE AT A TIME, THEN GO DARK', 'PASS TO WHO WORE THE CALL · NOBODY? PLAY IT BACK'],
   turn: ['BACK TO GOAL, A PRESSER BEHIND YOU', 'CHECK YOUR SHOULDER: FREE = TURN, PRESSED = PASS BACK'],
   inhibit: ['A BEEP MEANS YOUR LANE IS CLOSING', 'SWITCH TO ANOTHER PASS, FAST'],
   sandwich: ['TWO PRESSERS CLOSE IN FROM THE SIDES', 'ONE TOUCH BACK TO THE DEFENDER'],

@@ -99,8 +99,8 @@ const leadPoint = (rep: any, w: any) => {
   return L;
 };
 
-test('registry: ten scenarios with names and roles', () => {
-  expect(KEYS).toEqual(['press', 'switch', 'thirdman', 'signal', 'colour', 'turn', 'inhibit', 'sandwich', 'through', 'gkbuild']);
+test('registry: eleven scenarios with names and roles', () => {
+  expect(KEYS).toEqual(['press', 'switch', 'thirdman', 'signal', 'colour', 'memory', 'turn', 'inhibit', 'sandwich', 'through', 'gkbuild']);
   for (const k of KEYS) {
     expect(typeof (SCENARIO_NAMES as any)[k]).toBe('string');
     expect((SCENARIO_NAMES as any)[k]).toBe((SCENARIO_NAMES as any)[k].toUpperCase());
@@ -887,6 +887,7 @@ test('every scenario result carries correct and oneTouchBack as booleans and a c
     thirdman: /^MARKER ON YOUR BACK · ONE TOUCH INTO THE RUN$/,
     signal: /^#\d+ WAVING, COVERED · #\d+ FREE$/,
     colour: /^[A-Z]+ CALLED · FIRST TIME$/,
+    memory: /^(MISSED \d OF 3 FLASHES|SAW ALL 3 FLASHES)/,
     turn: /^(SHOULDER CHECK · TURN AND PLAY FORWARD|NO SHOULDER CHECK · BOUNCE IT BACK)$/,
     inhibit: /^(TONE · LANE SHUT · SWITCH WITHIN 0\.8 S|NO TONE · LANE STAYED OPEN)$/,
     sandwich: /^PRESSERS BOTH SIDES · ONE TOUCH BACK$/,
@@ -944,4 +945,80 @@ test('the window is the scenario\'s own floor when the presser is close: inhibit
     play(rep, w, noop);
     expect(rep.window).toBeGreaterThanOrEqual((SCENARIOS as any)[key].minWindow - 1e-9);
   }
+});
+
+// --- colour memory --------------------------------------------------------------------------
+// a bot that looks at whoever is flashing and remembers what it saw, then acts on the call
+const memoryBot = () => {
+  const seen = new Map<any, number>();
+  return (rep: any, w: any) => {
+    if (rep.state === 'buildup') {
+      const f = rep.flashes.find((f: any) => rep.t >= f.at && rep.t < f.at + f.len);
+      w.yaw = heading(w.user, f ? f.p.pos : w.ball.pos);
+      if (f && f.p.ringMat.opacity > 0.5) seen.set(f.p, f.p.ringHex);
+    } else if (rep.state === 'incoming' && rep.called) {
+      w.yaw = heading(w.user, w.ball.pos);
+      const hex = rep.callColour.hex;
+      const mate = rep.coloured.find((p: any) => seen.get(p) === hex);
+      aimAt(w, rep, mate || rep.passer);
+    }
+  };
+};
+
+test('memory: one flash at a time during the build-up, every flash shown before the last pass, rings dark after', () => {
+  for (let n = 0; n < 12; n++) {
+    const A = make('memory', undefined, { diff: n % 2 ? 'HARD' : 'EASY' });
+    expect(A.rep.flashes.length).toBe(4);
+    expect(new Set(A.rep.flashes.map((f: any) => f.colour.hex)).size).toBe(4);
+    let maxLit = 0, litAtStrike = -1;
+    play(A.rep, A.w, (rep, w) => {
+      const lit = [...rep.coloured, rep.decoy].filter((p: any) => p.ringMat.opacity > 0.5).length;
+      if (rep.state === 'buildup') maxLit = Math.max(maxLit, lit);
+      if (rep.state === 'incoming' && litAtStrike < 0) litAtStrike = lit;
+    });
+    expect(maxLit).toBe(1);
+    expect(litAtStrike).toBe(0);
+    const last = A.rep.flashes[3];
+    expect(A.rep.strikeAt).toBeGreaterThanOrEqual(last.at + last.len - 1e-6);
+  }
+});
+
+test('memory: the fakes (unworn colour, the opponent\'s colour, no colour) all come up and want the ball played back', () => {
+  const kinds = new Set<string>();
+  for (let n = 0; n < 60; n++) {
+    const A = make('memory');
+    kinds.add(A.rep.callKind);
+    if (A.rep.callKind !== 'mate') {
+      expect(A.rep.answer().target).toBe(A.rep.passer);
+      expect(A.rep.coloured.some((p: any) => A.rep.cmap.get(p).hex === A.rep.callColour.hex)).toBe(false);
+    } else expect(A.rep.cmap.get(A.rep.answer().target).hex).toBe(A.rep.callColour.hex);
+  }
+  expect([...kinds].sort()).toEqual(['decoy', 'mate', 'none']);
+});
+
+test('memory: watching the flashes and remembering them gets it right; guessing a coloured teammate gets faked out', () => {
+  let good = 0, goodFakes = 0, lazy = 0, fakes = 0, faked = 0;
+  for (let n = 0; n < 30; n++) {
+    const A = make('memory');
+    play(A.rep, A.w, memoryBot());
+    const r = A.rep.result;
+    if (r.correct) good++;
+    if (r.callKind !== 'mate' && r.correct) goodFakes++;
+    expect(r.flashesMissed).toBe(0);
+    const B = make('memory');
+    play(B.rep, B.w, (rep, w) => {
+      // never looks away from the ball, plays the nearest teammate who had a ring
+      if (rep.state === 'incoming' && rep.called) {
+        const near = [...rep.coloured].sort((a: any, b: any) => a.pos.distanceTo(w.user) - b.pos.distanceTo(w.user))[0];
+        aimAt(w, rep, near);
+      }
+    });
+    if (B.rep.result.correct) lazy++;
+    if (B.rep.callKind !== 'mate') { fakes++; if (B.rep.result.fakedOut) faked++; }
+    expect(B.rep.result.flashesMissed).toBeGreaterThan(0);
+  }
+  expect(good).toBeGreaterThanOrEqual(27);
+  expect(goodFakes).toBeGreaterThan(0);
+  expect(lazy).toBeLessThan(12);
+  expect(faked).toBe(fakes);
 });

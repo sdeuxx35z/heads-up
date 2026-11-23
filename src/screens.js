@@ -63,7 +63,7 @@ export function home(app) {
     k.text(`${p.name} · ${p.number}`, x + 28, 678, 36, { color: p.color });
     const r = rating(p);
     k.text(r == null ? `${t.reps} REPS` : `RATING ${r}`, x + w / 2, 678, 36, { align: 'center' });
-    k.text(`${t.stars} / 72`, x + w - 28, 678, 36, { align: 'right', color: GLASS.dim });
+    k.text(`${t.stars} / ${CAREER.length * 3}`, x + w - 28, 678, 36, { align: 'right', color: GLASS.dim });
     if (app.xrSupported && !app.inXR) {
       k.button('vr', x, 716, w, 64, 'ENTER VR', { size: 34, onClick: () => app.enterVR() });
     }
@@ -102,11 +102,11 @@ export function career(app, mounted = false) {
     k.text(STAGES[stage], 70, 120, 84, { weight: 800 });
     const levels = CAREER.filter((l) => l.stage === stage);
     const passed = levels.filter((l) => p.passed[l.index]).length;
-    k.text(`${passed} / 6`, k.w - 70, 120, 44, { align: 'right', color: GLASS.dim });
+    k.text(`${passed} / ${levels.length}`, k.w - 70, 120, 44, { align: 'right', color: GLASS.dim });
     const next = nextLesson(p);
-    const cw = (k.w - 140 - 40) / 3, ch = 236;
+    const cols = Math.ceil(levels.length / 2), cw = (k.w - 140 - 20 * (cols - 1)) / cols, ch = 236;
     levels.forEach((l, i) => {
-      const x = 70 + (i % 3) * (cw + 20), y = 166 + Math.floor(i / 3) * (ch + 18);
+      const x = 70 + (i % cols) * (cw + 20), y = 166 + Math.floor(i / cols) * (ch + 18);
       const done = !!p.passed[l.index];
       const open = done || l.index === next || store.unlocked(l.index);
       const isNext = l.index === next && !done;
@@ -118,14 +118,16 @@ export function career(app, mounted = false) {
       k.text(String(l.index + 1).padStart(2, '0'), x + 26, y + 70, 56, { weight: 800, color: isNext ? UI.accent : ink });
       if (done) stars(k, p.stars[l.index], x + cw - 118, y + 52, 16, 38);
       else if (!open) k.text('LOCKED', x + cw - 26, y + 62, 26, { align: 'right', color: 'rgba(242,240,232,0.25)' });
-      k.text(l.name, x + 26, y + 124, 40, { color: ink });
+      // shrink to fit: the REMEMBER stage has four cards a row
+      const fit = (str, size, room) => { k.g.font = `700 ${size}px ${UI.font}`; while (size > 22 && k.g.measureText(str).width > room) { size -= 2; k.g.font = `700 ${size}px ${UI.font}`; } return size; };
+      k.text(l.name, x + 26, y + 124, fit(l.name, 40, cw - 52), { color: ink });
       const [key, need] = l.objective;
       const tag = OBJECTIVE_LABEL[key](need);
-      k.g.font = `700 30px ${UI.font}`;
+      const ts = fit(tag, 30, cw - 86);
       const tw = Math.min(cw - 52, k.g.measureText(tag).width + 34);
       k.g.fillStyle = open ? GLASS.chip : GLASS.chipOff; k.rr(x + 26, y + 150, tw, 42, 21); k.g.fill();
       edge(k.g, x + 26, y + 150, tw, 42, 21, open ? 0.2 : 0.08, 0.05);
-      k.text(tag, x + 43, y + 172, 30, { color: open ? UI.text : 'rgba(242,240,232,0.25)', base: 'middle' });
+      k.text(tag, x + 43, y + 172, ts, { color: open ? UI.text : 'rgba(242,240,232,0.25)', base: 'middle' });
       const best = p.best[l.index];
       if (best) k.text(`BEST ${best}`, x + 26, y + 220, 26, { color: GLASS.dim });
       if (open) k.hit(id, x, y, cw, ch, () => app.startCareer(l.index));

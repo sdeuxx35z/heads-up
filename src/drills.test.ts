@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { evaluateRondo, evaluateOptions, laneMargin } from './eval.js';
 import { ROLES, AWAY_442 } from './config.js';
 import { Rep } from './rep.js';
-import { RondoDrill, AwarenessDrill, DRILLS, DRILL_NAMES, DRILL_KEYS, perimeterPoint } from './drills.js';
+import { RondoDrill, AwarenessDrill, LatestDrill, CUE_HEX, CUE_NONE, DRILLS, DRILL_NAMES, DRILL_KEYS, perimeterPoint } from './drills.js';
 import { SCENARIOS, SCENARIO_NAMES } from './scenarios.js';
 import { makeQuiz, quizScreen } from './quiz.js';
 
@@ -143,7 +143,8 @@ test('rondo timeout loses the ball', () => {
 test('awareness: cue fires, snapshot carries it, quiz always asked', () => {
   const w = makeWorld();
   let snap: any = null;
-  const rep = new AwarenessDrill(w, { role: 'CM', difficulty: 'MEDIUM', quiz: false, motion: false, fx });
+  const rep: any = new AwarenessDrill(w, { role: 'CM', difficulty: 'MEDIUM', quiz: false, motion: false, fx });
+  rep.fakeChance = 0;
   rep.start();
   expect(rep.quizWanted).toBe(true);
   let shown = 0, prev = 0;
@@ -154,7 +155,8 @@ test('awareness: cue fires, snapshot carries it, quiz always asked', () => {
   expect(rep.state).toBe('quiz');
   snap = rep.snapshot;
   expect([0, 1, 2, 3, 4]).toContain(snap.cueColor);
-  expect(snap.cue.colors.length).toBe(5);
+  expect(snap.cue.colors.length).toBe(6);
+  expect(snap.cue.names[5]).toBe('NONE');
   expect(snap.cue.color).toBe(snap.cueColor);
   expect(typeof snap.cueSeen).toBe('boolean');
   expect(shown).toBeGreaterThan(0.7);
@@ -165,7 +167,8 @@ test('awareness: cue fires, snapshot carries it, quiz always asked', () => {
 
 test('awareness: looking at the cued player sets cueSeen', () => {
   const w = makeWorld();
-  const rep = new AwarenessDrill(w, { role: 'CM', difficulty: 'EASY', quiz: true, motion: false, fx });
+  const rep: any = new AwarenessDrill(w, { role: 'CM', difficulty: 'EASY', quiz: true, motion: false, fx });
+  rep.fakeChance = 0;
   rep.start();
   for (let i = 0; i < 3000 && rep.state !== 'quiz'; i++) {
     if (rep.cueState === 1) w.yaw = Math.atan2(rep.cueP.pos.x - w.user.x, rep.cueP.pos.z - w.user.z);
@@ -302,6 +305,7 @@ test('awareness: both questions come up, the spot question has four map spots an
   for (let n = 0; n < 30; n++) {
     const w = makeWorld();
     const rep: any = new AwarenessDrill(w, { role: 'CM', difficulty: 'MEDIUM', quiz: false, motion: false, fx });
+    rep.fakeChance = 0;
     rep.start();
     if (n % 2) rep.cueMode = 'spot'; else rep.cueMode = 'colour';
     let flashAt: any = null;
@@ -312,8 +316,8 @@ test('awareness: both questions come up, the spot question has four map spots an
     const snap = rep.snapshot;
     const q = makeQuiz(snap);
     modes.add(q.type);
-    expect(snap.cue.colors.length).toBe(5);
-    expect(new Set(snap.cue.colors).size).toBe(5);
+    expect(snap.cue.colors.length).toBe(6);
+    expect(new Set(snap.cue.colors).size).toBe(6);
     if (n % 2) {
       expect(q.type).toBe('cuepos');
       const s = snap.cue.spots;
@@ -360,23 +364,24 @@ function quizKit() {
 function cueSnap(mode: 'colour' | 'spot') {
   const w = makeWorld();
   const rep: any = new AwarenessDrill(w, { role: 'CM', difficulty: 'MEDIUM', quiz: false, motion: false, fx });
+  rep.fakeChance = 0;
   rep.start();
   rep.cueMode = mode;
   for (let i = 0; i < 3000 && rep.state !== 'quiz'; i++) rep.update(1 / 30);
   return rep.snapshot;
 }
-test('quiz: the colour question has five answers and scores 100 or 0', () => {
+test('quiz: the colour question has six answers (five colours and NONE) and scores 100 or 0', () => {
   const snap = cueSnap('colour');
   const scores: number[] = [];
   const app = { answerQuiz: (s: number) => scores.push(s) };
   const q = makeQuiz(snap);
   const kit = quizKit();
   quizScreen(app, q)(kit);
-  expect(kit.hits.length).toBe(5);
-  expect(kit.texts).toContain('WHAT COLOUR FLASHED BEHIND YOU?');
-  expect(kit.texts.filter((t: string) => ['RED', 'YELLOW', 'GREEN', 'CYAN', 'PURPLE'].includes(t)).length).toBe(5);
+  expect(kit.hits.length).toBe(6);
+  expect(kit.texts).toContain('WHAT COLOUR LIT UP BEHIND YOU?');
+  expect(kit.texts.filter((t: string) => ['RED', 'YELLOW', 'GREEN', 'CYAN', 'PURPLE', 'NONE'].includes(t)).length).toBe(6);
   kit.hits.forEach((h: any) => h.onClick());
-  expect(scores.sort()).toEqual([0, 0, 0, 0, 100]);
+  expect(scores.sort()).toEqual([0, 0, 0, 0, 0, 100]);
   const k2 = quizKit();
   q.answered = true; q.guess = 0; q.score = 0;
   quizScreen(app, q)(k2);
@@ -414,4 +419,73 @@ test('quiz: the old questions still draw', () => {
     quizScreen({ answerQuiz() {} }, q)(kit);
     expect(kit.hits.length).toBeGreaterThan(0);
   }
+});
+
+// --- last colour: the ring keeps changing; the answer is what it was when the ball arrived -----------------
+test('latest: the colour changes, sometimes goes dark, sometimes during the flight; the answer is the state at arrival', () => {
+  let none = 0, inFlight = 0;
+  for (let n = 0; n < 40; n++) {
+    const w = makeWorld();
+    const rep: any = new LatestDrill(w, { role: 'CM', difficulty: 'MEDIUM', quiz: false, motion: false, fx });
+    rep.start();
+    let lastShown: number | null = null;
+    for (let i = 0; i < 3000 && rep.state !== 'quiz'; i++) {
+      rep.update(1 / 30);
+      if (rep.cueState === 1) lastShown = rep.cueP.ringMat.opacity > 0.5 ? CUE_HEX.indexOf(rep.cueP.ringMat.color.getHex()) : CUE_NONE;
+    }
+    expect(rep.state).toBe('quiz');
+    const snap = rep.snapshot;
+    expect(snap.cue.color).toBe(lastShown);
+    expect(snap.cue.names[snap.cue.color]).toBeTruthy();
+    expect(snap.cue.question).toMatch(/^#\d+'S COLOUR AS THE BALL ARRIVED\?$/);
+    expect(rep.changes).toBeGreaterThanOrEqual(1);
+    if (snap.cue.color === CUE_NONE) none++;
+    if (rep.lastChangeInFlight) inFlight++;
+    expect(makeQuiz(snap).type).toBe('cue');
+  }
+  expect(none).toBeGreaterThan(0);
+  expect(inFlight).toBeGreaterThan(10);
+});
+
+test('latest: only a look after the last change counts as seeing it', () => {
+  // looks at him once early, then watches the ball: stale whenever he changes afterwards
+  let staleCount = 0, freshCount = 0;
+  for (let n = 0; n < 20; n++) {
+    const w = makeWorld();
+    const rep: any = new LatestDrill(w, { role: 'CM', difficulty: 'MEDIUM', quiz: false, motion: false, fx });
+    rep.start();
+    for (let i = 0; i < 3000 && rep.state !== 'quiz'; i++) {
+      w.yaw = rep.cueState === 1 && rep.t - rep.cueAt < 0.4 ? Math.atan2(rep.cueP.pos.x - w.user.x, rep.cueP.pos.z - w.user.z) : Math.atan2(w.ball.pos.x - w.user.x, w.ball.pos.z - w.user.z);
+      rep.update(1 / 30);
+    }
+    if (!rep.snapshot.cueSeen) staleCount++;
+    const w2 = makeWorld();
+    const r2: any = new LatestDrill(w2, { role: 'CM', difficulty: 'MEDIUM', quiz: false, motion: false, fx });
+    r2.start();
+    // keeps checking him until the ball lands
+    for (let i = 0; i < 3000 && r2.state !== 'quiz'; i++) {
+      w2.yaw = r2.cueState === 1 ? Math.atan2(r2.cueP.pos.x - w2.user.x, r2.cueP.pos.z - w2.user.z) : Math.atan2(w2.ball.pos.x - w2.user.x, w2.ball.pos.z - w2.user.z);
+      r2.update(1 / 30);
+    }
+    if (r2.snapshot.cueSeen) freshCount++;
+  }
+  // (now and then the ball's path lines up with him, and watching the ball is a real look at him)
+  expect(staleCount).toBeGreaterThanOrEqual(14);
+  expect(freshCount).toBe(20);
+});
+
+test('awareness: one colour rep in five nothing lights up and the answer is NONE', () => {
+  let fakes = 0;
+  for (let n = 0; n < 60; n++) {
+    const w = makeWorld();
+    const rep: any = new AwarenessDrill(w, { role: 'CM', difficulty: 'MEDIUM', quiz: false, motion: false, fx });
+    rep.start();
+    rep.cueMode = 'colour';
+    let lit = false;
+    for (let i = 0; i < 3000 && rep.state !== 'quiz'; i++) { rep.update(1 / 30); if (rep.cueState === 1) lit = true; }
+    if (rep.cueFake) { fakes++; expect(lit).toBe(false); expect(rep.snapshot.cue.color).toBe(CUE_NONE); }
+    else expect(lit).toBe(true);
+  }
+  expect(fakes).toBeGreaterThan(4);
+  expect(fakes).toBeLessThan(24);
 });

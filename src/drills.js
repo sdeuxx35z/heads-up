@@ -274,6 +274,9 @@ export class RondoDrill extends Rep {
 export const CUE_COLORS = PALETTE.map((c) => c.css);
 export const CUE_HEX = PALETTE.map((c) => c.hex);
 export const CUE_NAMES = PALETTE.map((c) => c.name);
+// the answer when nothing lit up (or the ring went dark): a guess has to beat six options, not five
+export const CUE_NONE = CUE_COLORS.length;
+const NONE_CSS = '#2c3331';
 const CUE_TIME = 0.8;
 
 // 100 for the right colour, 0 otherwise
@@ -284,6 +287,7 @@ export class AwarenessDrill extends Rep {
     super(world, { ...opts, role: ROLES[opts.role] ? opts.role : 'CM' });
     this.drillKey = 'awareness';
     this.quizWanted = true;
+    this.fakeChance = 0.2;
   }
 
   start() {
@@ -295,6 +299,7 @@ export class AwarenessDrill extends Rep {
     this.cueP = null;
     this.cueColor = (Math.random() * CUE_COLORS.length) | 0;
     this.cueMode = Math.random() < 0.5 ? 'colour' : 'spot';
+    this.cueFake = false;
     this.cueSpots = null;
     this.cueSpot = -1;
     this.cueSeen = false;
@@ -312,7 +317,11 @@ export class AwarenessDrill extends Rep {
   cueStep(dt) {
     const w = this.world;
     if (this.cueState === 0) {
-      if (this.state === 'buildup' && this.t >= this.cueAt) this.fireCue();
+      if (this.state === 'buildup' && this.t >= this.cueAt) {
+        // one colour rep in five nobody lights up: the honest answer is NONE, and only scanning earns it
+        if (this.cueMode === 'colour' && Math.random() < this.fakeChance) { this.cueFake = true; this.cueColor = CUE_NONE; this.cueState = 2; }
+        else this.fireCue();
+      }
     } else if (this.cueState === 1) {
       const user = w.userPos(this._cu);
       // the same look Rep credits: inside the 20 degree cone, held 0.12 s (gaps under 0.35 s forgiven); a snap turn is no look
@@ -417,8 +426,8 @@ export class AwarenessDrill extends Rep {
     s.cueColor = this.cueColor;
     s.cueSeen = this.cueSeen;
     s.cue = {
-      color: this.cueColor, colors: CUE_COLORS.slice(), hexes: CUE_HEX.slice(), names: CUE_NAMES.slice(), seen: this.cueSeen,
-      mode: this.cueMode, spots: this.cueSpots, spot: this.cueSpot,
+      color: this.cueColor, colors: [...CUE_COLORS, NONE_CSS], hexes: [...CUE_HEX, 0], names: [...CUE_NAMES, 'NONE'], seen: this.cueSeen,
+      mode: this.cueMode, spots: this.cueSpots, spot: this.cueSpot, question: this.cueQuestion?.() ?? null,
     };
     return s;
   }
@@ -429,11 +438,115 @@ export class AwarenessDrill extends Rep {
       this.result.cueColor = this.cueColor;
       this.result.cueSeen = this.cueSeen;
       this.result.cueMode = this.cueMode;
+      this.result.cueFake = !!this.cueFake;
     }
   }
 }
 
-export const DRILLS = { match: Rep, rondo: RondoDrill, awareness: AwarenessDrill, ...SCENARIOS };
-export const DRILL_NAMES = { match: 'MATCH SITUATION', rondo: 'RONDO 5V2', awareness: 'AWARENESS', ...SCENARIO_NAMES };
+// ---------------------------------------------------------------------------------------------
+// Last colour: a teammate behind you wears a colour that keeps changing, and sometimes goes dark.
+// When the ball reaches you the screen blacks out: what was he wearing at that moment? An early
+// look is stale by then, so it takes looks right through the build-up and one more while the pass
+// travels (in three reps out of five the last change comes during the flight).
+// ---------------------------------------------------------------------------------------------
+export class LatestDrill extends AwarenessDrill {
+  constructor(world, opts) {
+    super(world, opts);
+    this.drillKey = 'latest';
+  }
+
+  start() {
+    super.start();
+    this.drillKey = 'latest';
+    this.cueMode = 'colour';
+    this.cueFake = false;
+    this.cueAt = rand(0.3, 0.6);
+    this.cueColor = (Math.random() * CUE_COLORS.length) | 0;
+    this.changes = 0;
+    this.nextChange = Infinity;
+    this.flightPlanned = false;
+    this.lastChangeInFlight = false;
+    this.minFlight = 1.3; // time for one look while it travels
+  }
+
+  cueStep(dt) {
+    if (this.cueState === 0) {
+      if (this.state === 'buildup' && this.t >= this.cueAt) this.fireCue();
+      return;
+    }
+    if (this.cueState !== 1) return;
+    const user = this.world.userPos(this._cu);
+    if (!this.snapThisFrame && !this.cueSeen) {
+      if (angDiff(this.world.headYaw(), heading(user, this.cueP.pos)) < GAZE_CONE) {
+        this.cueHold += dt; this.cueGap = 0;
+        if (this.cueHold >= GAZE_HOLD) this.cueSeen = true;
+      } else if ((this.cueGap += dt) > GAZE_GAP) this.cueHold = 0;
+    }
+    if (this.state === 'incoming' && !this.flightPlanned) {
+      this.flightPlanned = true;
+      const fl = this.finalFlight || 1.3;
+      this.nextChange = Math.random() < 0.6 ? this.t + rand(0.2, Math.max(0.3, fl - 0.45)) : Infinity;
+    }
+    if (this.t >= this.nextChange) this.change();
+  }
+
+  fireCue() {
+    const w = this.world, user = w.userPos(this._cu), toBall = heading(user, w.ball.pos);
+    // a teammate well away from the ball, so every check means turning the head
+    const pool = this.mates.filter((p) => p !== this.carrier && p.slot !== 'GK').map((p) => ({
+      p, a: angDiff(heading(user, p.pos), toBall), d: Math.hypot(p.pos.x - user.x, p.pos.z - user.z),
+    }));
+    const behind = pool.filter((x) => x.a > 100 * DEG && x.d > 4 && x.d < 28);
+    this.cueP = (behind.length ? behind[(Math.random() * behind.length) | 0] : pool.sort((a, b) => b.a - a.a)[0]).p;
+    this.cueState = 1;
+    this.paint();
+    this.nextChange = this.t + rand(0.8, 1.3) / this.speed;
+    this.events.push({ t: this.t, type: 'cue' });
+  }
+
+  change() {
+    const was = this.cueColor;
+    if (was !== CUE_NONE && this.changes > 0 && Math.random() < 0.25) this.cueColor = CUE_NONE;
+    else {
+      let c;
+      do c = (Math.random() * CUE_COLORS.length) | 0; while (c === was);
+      this.cueColor = c;
+    }
+    this.changes++;
+    this.cueSeen = false; this.cueHold = 0; this.cueGap = 0;
+    this.lastChangeInFlight = this.state === 'incoming';
+    this.paint();
+    this.nextChange = this.state === 'incoming' ? Infinity : this.t + rand(0.8, 1.3) / this.speed;
+    this.events.push({ t: this.t, type: 'cue' });
+  }
+
+  paint() {
+    if (!this.cueP) return;
+    if (this.cueColor === CUE_NONE) this.cueP.highlight(0xffffff, 0);
+    else this.cueP.highlight(CUE_HEX[this.cueColor], 0.95);
+  }
+
+  // the build-up never goes to him: following the ball must not count as checking him
+  nextPass(user) {
+    if (!this.cueP || this.cueP === this.carrier) { super.nextPass(user); return; }
+    const keep = this.mates;
+    this.mates = keep.filter((p) => p !== this.cueP);
+    try { super.nextPass(user); } finally { this.mates = keep; }
+  }
+
+  cueQuestion() { return this.cueP ? `#${this.cueP.number}'S COLOUR AS THE BALL ARRIVED?` : null; }
+
+  finish() {
+    super.finish();
+    if (this.result) {
+      this.result.cueChanges = this.changes;
+      this.result.lastChangeInFlight = this.lastChangeInFlight;
+      this.result.fact = this.cueSeen ? 'SAW THE LAST COLOUR' : this.lastChangeInFlight ? 'IT CHANGED WHILE THE BALL CAME' : 'YOUR LAST LOOK WAS TOO EARLY';
+    }
+  }
+}
+
+export const DRILLS = { match: Rep, rondo: RondoDrill, awareness: AwarenessDrill, latest: LatestDrill, ...SCENARIOS };
+export const DRILL_NAMES = { match: 'MATCH SITUATION', rondo: 'RONDO 5V2', awareness: 'AWARENESS', latest: 'LAST COLOUR', ...SCENARIO_NAMES };
 export const DRILL_KEYS = Object.keys(DRILLS);
 export { SCENARIOS, SCENARIO_NAMES, SCENARIO_ROLES };

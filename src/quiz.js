@@ -68,28 +68,30 @@ export function quizScreen(app, q) {
     const g = k.g;
     const titles = {
       nearest: 'WHERE WAS THE NEAREST OPPONENT?', count: 'OPPONENTS WITHIN 10 METRES?', free: 'WHO HAD THE MOST SPACE?',
-      cue: 'WHAT COLOUR FLASHED BEHIND YOU?', cuepos: 'WHERE DID IT FLASH?',
+      cue: 'WHAT COLOUR LIT UP BEHIND YOU?', cuepos: 'WHERE DID IT FLASH?',
     };
     if (q.type === 'cue') {
       // five colours: a blind guess is one in five
       const cols = q.snap.cue.colors, names = q.snap.cue.names, n = cols.length;
-      const bw = 214, gap = 22, x0 = (k.w - (bw * n + gap * (n - 1))) / 2;
+      const gap = 18, bw = Math.min(214, (k.w - 100 - gap * (n - 1)) / n), x0 = (k.w - (bw * n + gap * (n - 1))) / 2;
       cols.forEach((c, i) => {
         const x = x0 + i * (bw + gap), right = i === q.snap.cue.color;
+        const ink = names[i] === 'NONE' ? UI.text : '#111';
         if (q.answered) {
           g.globalAlpha = right || q.guess === i ? 1 : 0.25;
           g.fillStyle = c; k.rr(x, 250, bw, 260, 26); g.fill();
           g.globalAlpha = 1;
-          k.text(right ? 'YES' : q.guess === i ? 'NO' : '', x + bw / 2, 390, 64, { align: 'center', base: 'middle', weight: 800, color: '#111' });
+          k.text(right ? 'YES' : q.guess === i ? 'NO' : '', x + bw / 2, 390, 64, { align: 'center', base: 'middle', weight: 800, color: ink });
         } else {
           g.fillStyle = c; k.rr(x, 250, bw, 260, 26); g.fill();
           if (k.hovered('cue' + i)) { g.strokeStyle = '#fff'; g.lineWidth = 6; k.rr(x + 3, 253, bw - 6, 254, 24); g.stroke(); }
-          k.text(names[i], x + bw / 2, 470, 36, { align: 'center', color: '#111' });
+          if (names[i] === 'NONE') { g.strokeStyle = 'rgba(242,240,232,0.35)'; g.lineWidth = 3; k.rr(x + 1.5, 251.5, bw - 3, 257, 25); g.stroke(); }
+          k.text(names[i], x + bw / 2, 470, 36, { align: 'center', color: ink });
           k.hit('cue' + i, x, 250, bw, 260, () => { q.guess = i; app.answerQuiz(i === q.snap.cue.color ? 100 : 0); });
         }
       });
     }
-    k.text(titles[q.type], k.w / 2, 90, 56, { weight: 800, align: 'center' });
+    k.text((q.type === 'cue' && q.snap.cue.question) || titles[q.type], k.w / 2, 90, 56, { weight: 800, align: 'center' });
 
     // Four lettered spots on the map; one is where the cued player stood (snap.cue.spots, snap.cue.spot).
     if (q.type === 'cuepos') {

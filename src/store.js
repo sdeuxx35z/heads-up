@@ -1,10 +1,32 @@
-import { STAR_LINES } from './config.js';
+import { STAR_LINES, CAREER, CAREER_INSERTS } from './config.js';
 
 const KEY = 'headsup.v1';
 const PROFILE_COLORS = ['#ff7a1a', '#4fd88a', '#5aa9ff'];
 
+const N = CAREER.length;
 function blankProfile(i) {
-  return { name: `PLAYER ${i + 1}`, number: [8, 10, 6][i], color: PROFILE_COLORS[i], stars: Array(24).fill(0), best: Array(24).fill(0), passed: Array(24).fill(false), fails: Array(24).fill(0), dailies: [], sessions: [] };
+  return { name: `PLAYER ${i + 1}`, number: [8, 10, 6][i], color: PROFILE_COLORS[i], stars: Array(N).fill(0), best: Array(N).fill(0), passed: Array(N).fill(false), fails: Array(N).fill(0), dailies: [], sessions: [] };
+}
+
+// Lessons added after a profile was saved: open a gap at each new index so old progress stays on the
+// lesson it was earned on. The new lessons start unpassed, so CONTINUE takes you to them.
+function migrate(raw) {
+  const v = raw.careerV || 1;
+  for (const [ver, at] of CAREER_INSERTS) {
+    if (v >= ver) continue;
+    for (const p of raw.profiles) {
+      for (const k of ['passed', 'fails', 'stars', 'best']) {
+        if (!Array.isArray(p[k])) continue;
+        const fill = k === 'passed' ? false : 0;
+        for (const i of at) p[k].splice(i, 0, fill);
+      }
+      for (const s of p.sessions || []) if (s.level != null) for (const i of at) if (s.level >= i) s.level++;
+    }
+  }
+  raw.careerV = CAREER_INSERTS.reduce((m, [ver]) => Math.max(m, ver), 1);
+  for (const p of raw.profiles) for (const k of ['passed', 'fails', 'stars', 'best']) {
+    if (Array.isArray(p[k])) while (p[k].length < N) p[k].push(k === 'passed' ? false : 0);
+  }
 }
 
 function load() {
@@ -14,11 +36,13 @@ function load() {
       // profiles saved before the learning career get the new fields
       // settings added in later versions get their defaults
       raw.settings = { motion: false, height: 'auto', snapTurn: false, coach: true, volume: 0.8, ticks: true, ...raw.settings };
-      raw.profiles = raw.profiles.map((p, i) => ({ ...blankProfile(i), ...p, passed: p.passed || Array(24).fill(false), fails: p.fails || Array(24).fill(0), dailies: p.dailies || [] }));
+      raw.profiles = raw.profiles.map((p, i) => ({ ...blankProfile(i), ...p, passed: p.passed || Array(N).fill(false), fails: p.fails || Array(N).fill(0), dailies: p.dailies || [] }));
+      migrate(raw);
       return raw;
     }
   } catch {}
   return {
+    careerV: CAREER_INSERTS.reduce((m, [ver]) => Math.max(m, ver), 1),
     active: 0,
     profiles: [0, 1, 2].map(blankProfile),
     settings: { motion: false, height: 'auto', snapTurn: false, coach: true, volume: 0.8, ticks: true },
