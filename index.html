@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Heads Up</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&family=Barlow:wght@600&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; height: 100%; background: #07090b; overflow: hidden; }
+  canvas { display: block; touch-action: none; cursor: grab; }
+  #boot { position: fixed; inset: 0; display: grid; place-items: center; color: #f2f0e8;
+    font: 800 64px "Barlow Condensed", "Arial Narrow", sans-serif; letter-spacing: 0.01em; }
+  #hint { position: fixed; left: 20px; bottom: 16px; color: rgba(242,240,232,0.5);
+    font: 600 18px "Barlow Condensed", sans-serif; letter-spacing: 0.04em; display: none; pointer-events: none; }
+  body.desk #hint { display: block; }
+</style>
+<script type="module" crossorigin src="./chunk-5g3qfhtf.js"></script><link rel="manifest" href="./manifest.webmanifest"><link rel="icon" href="./icon-192.png"><meta name="theme-color" content="#07090b"><script>if('serviceWorker' in navigator)addEventListener('load',()=>navigator.serviceWorker.register('./sw.js'))</script></head>
+<body>
+<div id="boot">HEADS UP</div>
+<button id="enter" type="button" style="position:fixed;left:50%;bottom:48px;transform:translateX(-50%);display:none;padding:22px 64px;border-radius:40px;border:1.5px solid rgba(255,255,255,0.35);background:rgba(255,122,26,0.92);color:#111;font:800 34px 'Barlow Condensed',sans-serif;letter-spacing:0.02em;cursor:pointer;box-shadow:0 12px 40px rgba(0,0,0,0.45)">ENTER VR</button>
+<div id="vrerr" hidden style="position:fixed;left:50%;bottom:140px;transform:translateX(-50%);color:#ff5a4f;font:700 20px 'Barlow Condensed',sans-serif"></div>
+<style>body.vr-ready:not(.xr) #enter{display:block!important}</style>
+<div id="hint">DRAG TO LOOK · WASD RUNS · SHIFT SPRINTS · CLICK A TEAMMATE TO PASS · ESC PAUSES</div>
+
+</body>
+</html>
